@@ -5,6 +5,10 @@ puis applique l'esprit d'équipe τ et la soustraction adverse :
 
     r_final(i) = (1 - τ) * r_i + τ * moyenne(r de l'équipe de i) - zero_sum * moyenne(r de l'équipe adverse)
 
+Option `rewards.zero_sum_terms` : liste des termes concernés par la soustraction adverse (null = tous, comportement
+d'origine). Exemple [goal, vel_ball_to_goal] : les rewards « d'apprentissage des bases » (toucher, aller vers la
+balle, s'orienter) ne sont plus annulées quand l'adversaire fait la même chose.
+
 La progression (nombre global de pas) est lue dans shared_info["global_step"], mise à jour par le trainer.
 Les sommes par terme de l'épisode sont accumulées dans shared_info["reward_log"] pour le suivi.
 """
@@ -139,6 +143,24 @@ class DoubleCommitTerm(RewardTerm):
                 for a in agents}
 
 
+class TouchStrengthTerm(RewardTerm):
+    """Puissance de frappe : à chaque touche, gain de vitesse de la balle (normalisé par sa vitesse max).
+    Récompense les vraies frappes plutôt que les simples contacts. Poids absent du YAML = terme désactivé."""
+    name = "touch_strength"
+
+    def __init__(self):
+        self.prev_ball_vel = np.zeros(3, dtype=np.float32)
+
+    def reset(self, agents, state, shared_info):
+        self.prev_ball_vel = np.asarray(state.ball.linear_velocity, dtype=np.float32).copy()
+
+    def get(self, agents, state, shared_info):
+        vel = np.asarray(state.ball.linear_velocity, dtype=np.float32)
+        gain = float(np.linalg.norm(vel - self.prev_ball_vel)) / cv.BALL_MAX_SPEED
+        self.prev_ball_vel = vel.copy()
+        return {a: (gain if state.cars[a].ball_touches > 0 else 0.0) for a in agents}
+
+
 def linear_schedule(start: float, end: float, steps: float, t: float) -> float:
     if steps <= 0:
         return end
@@ -149,12 +171,14 @@ def linear_schedule(start: float, end: float, steps: float, t: float) -> float:
 class TeamReward(RewardFunction[str, GameState, float]):
     def __init__(self, terms: List[RewardTerm], weights: Dict[str, float],
                  anneal: Optional[Dict[str, Dict[str, float]]] = None,
-                 team_spirit: Optional[Dict[str, float]] = None, zero_sum: float = 1.0):
+                 team_spirit: Optional[Dict[str, float]] = None, zero_sum: float = 1.0,
+                 zero_sum_terms: Optional[List[str]] = None):
         self.terms = [t for t in terms if weights.get(t.name, 0.0) != 0.0]
         self.weights = dict(weights)
         self.anneal = anneal or {}
         self.team_spirit = team_spirit or {"start": 0.0, "end": 0.0, "steps": 1}
         self.zero_sum = zero_sum
+        self.zero_sum_terms = None if zero_sum_terms is None else set(zero_sum_terms)
 
     def current_weight(self, name: str, step: float) -> float:
         w = self.weights.get(name, 0.0)
@@ -175,28 +199,45 @@ class TeamReward(RewardFunction[str, GameState, float]):
     def get_rewards(self, agents, state, is_terminated, is_truncated, shared_info) -> Dict[str, float]:
         step = float(shared_info.get("global_step", 0))
         raw = {a: 0.0 for a in agents}
+        raw_zs = raw if self.zero_sum_terms is None else {a: 0.0 for a in agents}
         log = shared_info.setdefault("reward_log", {})
+        n = max(1, len(agents))
         for term in self.terms:
             w = self.current_weight(term.name, step)
             vals = term.get(agents, state, shared_info)
+            in_zs = self.zero_sum_terms is not None and term.name in self.zero_sum_terms
+            total = 0.0
             for a in agents:
                 v = w * vals[a]
                 raw[a] += v
-            log[term.name] = log.get(term.name, 0.0) + sum(w * vals[a] for a in agents) / max(1, len(agents))
+                if in_zs:
+                    raw_zs[a] += v
+                total += v
+            log[term.name] = log.get(term.name, 0.0) + total / n
         return combine_team_rewards(raw, {a: state.cars[a].team_num for a in agents},
-                                    self.current_tau(step), self.zero_sum)
+                                    self.current_tau(step), self.zero_sum, raw_opp=raw_zs)
 
 
-def combine_team_rewards(raw: Dict[str, float], teams: Dict[str, int], tau: float, zero_sum: float) -> Dict[str, float]:
-    team_vals: Dict[int, List[float]] = {}
-    for a, r in raw.items():
-        team_vals.setdefault(teams[a], []).append(r)
-    team_mean = {t: float(np.mean(v)) for t, v in team_vals.items()}
+def _team_means(vals: Dict[str, float], teams: Dict[str, int]) -> Dict[int, float]:
+    sums: Dict[int, float] = {}
+    counts: Dict[int, int] = {}
+    for a, r in vals.items():
+        t = teams[a]
+        sums[t] = sums.get(t, 0.0) + r
+        counts[t] = counts.get(t, 0) + 1
+    return {t: sums[t] / counts[t] for t in sums}
+
+
+def combine_team_rewards(raw: Dict[str, float], teams: Dict[str, int], tau: float, zero_sum: float,
+                         raw_opp: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+    """raw_opp : part des rewards soumise à la soustraction adverse (par défaut : toutes)."""
+    team_mean = _team_means(raw, teams)
+    opp_team_mean = team_mean if raw_opp is None or raw_opp is raw else _team_means(raw_opp, teams)
     out = {}
     for a, r in raw.items():
         t = teams[a]
-        opp = [m for tt, m in team_mean.items() if tt != t]
-        opp_mean = float(np.mean(opp)) if opp else 0.0
+        opp = [m for tt, m in opp_team_mean.items() if tt != t]
+        opp_mean = sum(opp) / len(opp) if opp else 0.0
         out[a] = (1.0 - tau) * r + tau * team_mean[t] - zero_sum * opp_mean
     return out
 
@@ -211,5 +252,7 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         FaceBallTerm(),
         BoostGainTerm(loss_coef=rc.get("boost_loss_coef", 0.0)),
         DoubleCommitTerm(radius=rc.get("double_commit_radius", 900), min_speed=rc.get("double_commit_min_speed", 400)),
+        TouchStrengthTerm(),
     ]
-    return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0))
+    return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0),
+                      rc.get("zero_sum_terms"))

@@ -45,6 +45,18 @@ Agent de reinforcement learning pour Rocket League capable de jouer en **1v1, 2v
 - **Critique « centralisé »** : Rocket League étant entièrement observable, l'acteur voit déjà tout le terrain ;
   le critique est donc un réseau séparé recevant l'état global vu depuis l'agent (variante MAPPO standard).
 
+## ⏱️ Débit mesuré (S1-21)
+
+| Machine | Config | Collecte seule | De bout en bout |
+|---|---|---|---|
+| Portable (Core Ultra 5 125H, 14 cœurs, sans GPU) | 4 workers × 8 arènes, synchrone, 8 threads (`configs/laptop.yaml`) | ~6 700 steps/s | **~1 400 steps/s** (≈ 5 M steps/heure) |
+| Gros PC | à mesurer : `python scripts/benchmark_sps.py --workers 4 8 12 --envs 4 8` | — | — |
+
+Sur CPU, le goulot est l'**update PPO/SPO** (~25 s pour 50k steps), pas la simulation : un GPU (gros PC ou Kaggle) est
+le principal levier restant. Optimisations déjà faites, sans effet sur l'apprentissage (vérifiées par des tests
+d'équivalence) : plusieurs arènes par worker, Transformer limité aux jetons réels (×1,65 sur l'update),
+observations optimisées en 2v2/3v3.
+
 ## 🎯 Objectif « battre un Grand Champion 1 »
 
 GC1 ≈ le niveau de **Nexto** (≈ GC1 en 1v1/2v2/3v3), qui a demandé l'équivalent de ~250 000 heures de jeu

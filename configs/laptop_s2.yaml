@@ -1,0 +1,21 @@
+# Run « s2 » sur le portable : laptop.yaml + améliorations pour un agent plus fort (proposées le 12/10/2026).
+# À utiliser EN PLUS de laptop :  python -m rlagent.train --profile laptop --profile laptop_s2 --run-name s2_spo_laptop
+# Chaque point est une option désactivée par défaut dans le code ; default.yaml et le run s1 ne changent pas.
+# Comparaison : courbes de s1_spo_laptop au même global_step (touches/min, buts/min, but vide, Elo).
+rewards:
+  # 1) Zéro-somme seulement sur les rewards « de match ». Les rewards d'apprentissage des bases ne sont plus
+  #    annulées quand l'adversaire fait la même chose (s1 : entropie encore à 4,09 après 34 M steps).
+  zero_sum_terms: [goal, vel_ball_to_goal]
+  weights:
+    touch_strength: 0.5          # 2) frappes puissantes plutôt que simples contacts
+  # 3) Décroissances calées sur le compute réel du portable (~5-6 M steps/heure) au lieu de 100-300 M steps.
+  anneal:
+    touch: {end: 0.3, steps: 60_000_000}
+    vel_player_to_ball: {end: 0.0, steps: 40_000_000}
+    face_ball: {end: 0.0, steps: 20_000_000}
+  team_spirit: {start: 0.0, end: 0.3, steps: 60_000_000}
+env:
+  # 4) États de départ variés (attaque/défense, balle aérienne) en plus du kickoff et de l'aléatoire.
+  start_weights: {kickoff: 0.4, random: 0.3, attack_defense: 0.2, aerial: 0.1}
+selfplay:
+  pool_every_steps: 2_500_000    # 5) pool alimenté 2x plus souvent (Elo plus informatif)

@@ -63,7 +63,7 @@ def test_config_profiles_and_overrides():
     assert cfg["env"]["format_weights"] == {1: 1.0}
     assert cfg["model"]["d_model"] == 32
     assert isinstance(cfg["train"]["n_workers"], int)
-    for p in ("laptop", "bigpc"):
+    for p in ("laptop", "bigpc", "laptop_s2"):
         load_config([p])
 
 
@@ -82,3 +82,28 @@ def test_empty_goal_scenario():
         orange = s.cars["orange-0"].physics.position
         assert blue[1] < b[1] and abs(blue[0]) <= 3800
         assert orange[1] < -4000  # garé dans le camp bleu, loin du but orange (+Y)
+
+
+def test_new_start_states_valid_and_symmetric():
+    from rlgym.rocket_league.common_values import BACK_WALL_Y as cv_back
+    """attack_defense / aerial : positions dans le terrain, voitures au sol ; chaque équipe attaque ~1 fois sur 2."""
+    for kind in ("attack_defense", "aerial"):
+        m = StartStateMutator({kind: 1.0}, seed=0)
+        attack_blue = 0
+        for i in range(300):
+            s = _empty_state()
+            info = {}
+            RandomFormatMutator({1: 0.4, 2: 0.3, 3: 0.3}, seed=i).apply(s, info)
+            m.apply(s, info)
+            assert info["start_kind"] == kind
+            b = s.ball.position
+            assert abs(b[0]) < 4096 and abs(b[1]) < 5120 and 90 <= b[2] < 2044
+            for c in s.cars.values():
+                p = c.physics.position
+                assert abs(p[0]) <= 3800 and abs(p[1]) <= cv_back - 300 and p[2] == 17.0
+            if kind == "aerial":
+                assert b[2] >= 300
+            else:
+                attack_blue += int(b[1] > 0)
+        if kind == "attack_defense":
+            assert 0.4 < attack_blue / 300 < 0.6

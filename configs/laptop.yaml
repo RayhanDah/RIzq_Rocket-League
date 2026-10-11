@@ -4,11 +4,14 @@ ppo:
   minibatch_size: 25_000
   device_chunk: 4_096
 train:
-  # Core Ultra 5 125H (14 cœurs). Collecte seule : 12 workers → 3 758 sps, 16 → 4 008 sps.
-  # L'update (~35 s / 50k steps sur CPU) est le goulot : en collecte asynchrone, 9 workers suffisent
-  # (collecte ~24 s < update) et laissent du CPU à l'apprentissage. Débit total ≈ 1 400 sps (11/10/2026).
-  n_workers: 9
-  async_collect: true           # collecte du lot suivant pendant l'update (1 itération de retard, ratio exact)
+  # Core Ultra 5 125H (14 cœurs), benchmarks du 12/10/2026 (runs de 400k steps, scripts/benchmark_sps.py) :
+  # - collecte seule : 9 workers x 1 arène → ~3 400 sps ; 4 workers x 8 arènes → ~6 700 sps ;
+  # - de bout en bout : 4x8, synchrone, 8 threads → ~1 400 sps (collecte ~11 s + update ~25 s pour 50k steps),
+  #   autant que l'asynchrone et plus simple. L'update sur CPU reste le goulot (cf. GPU / Kaggle).
+  n_workers: 4
+  envs_per_worker: 8
+  async_collect: false          # true = collecte du lot suivant pendant l'update (1 itération de retard, ratio exact)
+  torch_threads: 8
   checkpoint_every_steps: 2_000_000
 selfplay:
   pool_every_steps: 5_000_000

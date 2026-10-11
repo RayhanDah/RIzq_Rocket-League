@@ -66,14 +66,14 @@
 
 ## ✅ Definition of Done (sprint)
 
-- [ ] Installation reproductible sur les 2 machines (`requirements.txt` figé)
-- [ ] Un seul modèle tourne en 1v1, 2v2 et 3v3
-- [ ] PPO **et** SPO fonctionnent (flag)
+- [ ] Installation reproductible sur les 2 machines (`requirements.txt` figé) — portable ✅, gros PC ⏳
+- [x] Un seul modèle tourne en 1v1, 2v2 et 3v3
+- [x] PPO **et** SPO fonctionnent (flag)
 - [ ] Le bot marque dans un but vide en simulation
 - [ ] Le bot joue un match complet dans le vrai jeu via RLBot
 - [ ] Métriques d'apprentissage, de jeu et d'équipe visibles dans W&B
 - [ ] Collision meshes en place et test de cohérence simulation / vrai jeu documenté
-- [ ] Tests unitaires verts (`pytest`)
+- [x] Tests unitaires verts (`pytest`) — 38 tests
 
 ## 🔜 Aperçu du sprint 2
 
@@ -87,24 +87,22 @@ Prédiction de trajectoire de balle dans les observations, états de départ ava
 
 ---
 
-## 📍 Avancement au 11/10/2026 (code livré, à valider sur machine réelle)
+## 📍 Avancement au 12/10/2026 (validé sur le portable)
 
 | # | État | Remarque |
 |---|---|---|
-| S1-01/02 | ⏳ | Procédure complète dans `INSTALL.md` |
-| S1-03 | ✅ | Dépôt, arborescence, `pyproject.toml`, `requirements.txt` (figer avec `pip freeze` après install) |
-| S1-04 | ✅ code | W&B optionnel (auto : en ligne si `wandb login`, sinon hors ligne) + `metrics.jsonl` toujours |
-| S1-06 | ⛔ bloqué | Dumper bloqué par Easy Anti-Cheat → relancer le jeu sans EAC (INSTALL §4) |
-| S1-07 | ⏳ | Après S1-06 et RLBot |
-| S1-09 | ✅ testé | Obs à jetons masqués, normalisées côté équipe ; test de symétrie miroir vert |
-| S1-10 | ✅ testé | 90 actions, répétition 8, action précédente dans l'obs |
-| S1-11 | ✅ testé | Formats 70/20/10, écart < 3 % sur 3000 tirages |
-| S1-12 | ✅ testé | Kickoff + aléatoire (visualisation RLViser : `scripts/watch.py`) |
-| S1-13 | ✅ testé | 7 termes + esprit d'équipe τ + zéro-somme, poids en YAML |
-| S1-14 | ✅ code | Transformer à jetons, acteur + critique ; tests d'invariance écrits (PyTorch requis) |
-| S1-15/16 | ✅ code | PPO/SPO maison, flag `ppo.policy_loss` ; test « bandit » qui vérifie l'apprentissage |
-| S1-17 | ✅ code | Checkpoints, reprise, arrêt propre (fichier STOP), protection anti-NaN |
-| S1-18 | ✅ code | Métriques de jeu et d'équipe (double commit, contacts, distance, kickoffs vs historique) |
-| S1-19 | ✅ code | `bot/` + `scripts/export_bot.py` ; `bot.toml` à valider avec le wiki RLBot v5 |
-| S1-20/21 | ⏳ | `scripts/benchmark_sps.py`, puis run long |
-| bonus | ✅ code | Pool d'adversaires + Elo (prévu sprint 2), moteur factice pour tester toute la chaîne sans le jeu |
+| S1-01 | ✅ | Portable installé (Python 3.12, torch CPU) ; `scripts/check_install.py` → « Tout est prêt » ; versions dans `requirements.lock.txt` |
+| S1-02 | ⏳ PO | Gros PC + RLBot v5 à installer |
+| S1-03 | ✅ | Dépôt GitHub `knocee/Rl_SPO`, `requirements.lock.txt` figé |
+| S1-04 / S1-18 | ⏳ PO | Métriques calculées et dans `metrics.jsonl` + W&B **hors ligne** ; il manque `wandb login` + équipe W&B puis `wandb sync` |
+| S1-05 / S1-06 | ✅ portable | 16 collision meshes du dump du PO ; à copier sur le gros PC |
+| S1-07 / S1-08 | ⏳ | Test sim / vrai jeu : nécessite le gros PC + RLBot |
+| S1-09 → S1-14 | ✅ testé | Obs, actions, formats 70/20/10, états de départ, rewards + τ, acteur/critique à attention |
+| S1-12 | ✅ | Kickoff vu dans RLViser ; états aléatoires : `python scripts/watch.py --policy <run> --start random` |
+| S1-15 | ✅ | Le bot apprend à toucher la balle sur le vrai RocketSim (0,6 → 11 touches/min en 34 M steps) ; collecteur maison au lieu de rlgym-learn (écart à valider par le PO, cf. README) |
+| S1-16 | ✅ | SPO (run de 34 M steps) et PPO (run court de 250k steps) tournent sur le vrai RocketSim ; tests de la formule |
+| S1-17 | ✅ | Reprise testée plusieurs fois en conditions réelles (arrêt STOP → relance) |
+| S1-19 | 🟡 | `bot.toml` au format v5 vérifié avec le wiki, venv `.venv-bot` (rlgym-rlbot 0.3.0) : le bot se charge et joue hors jeu ; **match contre Psyonix Rookie à faire sur le gros PC** |
+| S1-20 | ❌ pas encore | Scénario « but vide » (`evaluate.py --scenario empty_goal`) : s1 à 34 M steps marque 6 % (stochastique) / 15 % (déterministe) en 10 s, contre 1 % au hasard → poursuivre l'entraînement (run s2) |
+| S1-21 | ✅ portable | Débits dans le README ; gros PC à mesurer |
+| bonus | ✅ | Pool + Elo, moteur factice, collecte multi-arènes, apprentissage sans jetons masqués, profil `laptop_s2` |

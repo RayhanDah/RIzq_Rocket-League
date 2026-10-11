@@ -100,3 +100,59 @@ def test_schedules_and_full_reward_runs():
     assert np.isclose(sum(out.values()), 0.0, atol=1e-5)  # symétrique au kickoff → zéro-somme
     assert np.isclose(rf.current_tau(10**12), cfg["rewards"]["team_spirit"]["end"])
     assert "touch" in info["reward_log"]
+
+
+def test_zero_sum_terms_default_unchanged_and_selective():
+    """zero_sum_terms=None : comportement d'origine ; [goal] : la touche adverse n'est plus soustraite."""
+    from rlagent.env.rewards import TeamReward
+    s = make_state(1)
+    s.cars["orange-0"].ball_touches = 1
+    agents = list(s.cars)
+    w = {"goal": 10.0, "touch": 0.5}
+    base = TeamReward([GoalTerm(), TouchTerm(0.0)], w)
+    info = {}
+    base.reset(agents, s, info)
+    r0 = base.get_rewards(agents, s, {}, {}, info)
+    assert np.isclose(r0["orange-0"], 0.5) and np.isclose(r0["blue-0"], -0.5)  # zéro-somme sur tout
+    sel = TeamReward([GoalTerm(), TouchTerm(0.0)], w, zero_sum_terms=["goal"])
+    info = {}
+    sel.reset(agents, s, info)
+    r1 = sel.get_rewards(agents, s, {}, {}, info)
+    assert np.isclose(r1["orange-0"], 0.5) and np.isclose(r1["blue-0"], 0.0)   # touche adverse non soustraite
+    # le but reste à somme nulle
+    s.goal_scored = True
+    s.ball.position = np.array([0, 5300.0, 100], dtype=np.float32)
+    s.cars["orange-0"].ball_touches = 0
+    r2 = sel.get_rewards(agents, s, {}, {}, info)
+    assert np.isclose(r2["blue-0"], 10.0) and np.isclose(r2["orange-0"], -10.0)
+
+
+def test_combine_matches_numpy_reference():
+    rng = np.random.default_rng(0)
+    for size in (1, 2, 3):
+        agents = [f"b{i}" for i in range(size)] + [f"o{i}" for i in range(size)]
+        teams = {a: (0 if a[0] == "b" else 1) for a in agents}
+        raw = {a: float(rng.normal()) for a in agents}
+        tau = float(rng.uniform())
+        out = combine_team_rewards(raw, teams, tau, 1.0)
+        for a in agents:
+            mine = np.mean([raw[b] for b in agents if teams[b] == teams[a]])
+            opp = np.mean([raw[b] for b in agents if teams[b] != teams[a]])
+            assert np.isclose(out[a], (1 - tau) * raw[a] + tau * mine - opp)
+
+
+def test_touch_strength_only_on_touch_and_disabled_by_default():
+    from rlagent.env.rewards import TouchStrengthTerm
+    s = make_state(1)
+    agents = list(s.cars)
+    t = TouchStrengthTerm()
+    s.ball.linear_velocity = np.zeros(3, dtype=np.float32)
+    t.reset(agents, s, {})
+    s.ball.linear_velocity = np.array([0, 3000.0, 0], dtype=np.float32)
+    s.cars["blue-0"].ball_touches = 1
+    r = t.get(agents, s, {})
+    assert np.isclose(r["blue-0"], 3000.0 / 6000.0) and r["orange-0"] == 0.0
+    # pas de poids dans default.yaml → terme absent de la reward (comportement d'origine)
+    cfg = load_config()
+    assert "touch_strength" not in cfg["rewards"]["weights"]
+    assert all(term.name != "touch_strength" for term in make_reward(cfg).terms)

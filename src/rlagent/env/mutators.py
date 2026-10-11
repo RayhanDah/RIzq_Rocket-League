@@ -69,6 +69,65 @@ class RandomStateMutator(StateMutator[GameState]):
             car.boost_amount = float(r.uniform(0, 100))
 
 
+def _place_car(car, x: float, y: float, yaw: float, speed: float, boost: float) -> None:
+    car.physics.position = np.array([np.clip(x, -3800, 3800), np.clip(y, -4800, 4800), 17.0], dtype=np.float32)
+    car.physics.linear_velocity = np.array([np.cos(yaw) * speed, np.sin(yaw) * speed, 0.0], dtype=np.float32)
+    car.physics.angular_velocity = np.zeros(3, dtype=np.float32)
+    car.physics.euler_angles = np.array([0.0, yaw, 0.0], dtype=np.float32)
+    car.boost_amount = float(boost)
+
+
+class AttackDefenseMutator(StateMutator[GameState]):
+    """Une équipe tirée au hasard attaque : balle dans le camp adverse, avançant vers le but, attaquants derrière
+    la balle ; défenseurs entre la balle et leur but. Symétrique (chaque équipe attaque une fois sur deux)."""
+
+    def __init__(self, seed: Optional[int] = None):
+        self.rng = np.random.default_rng(seed)
+
+    def apply(self, state: GameState, shared_info: Dict[str, Any]) -> None:
+        r = self.rng
+        attack_dir = 1.0 if r.random() < 0.5 else -1.0          # +Y : le bleu attaque
+        attacking_team = cv.BLUE_TEAM if attack_dir > 0 else cv.ORANGE_TEAM
+        bx, by = r.uniform(-2500, 2500), attack_dir * r.uniform(500, 3500)
+        ball = state.ball
+        ball.position = np.array([bx, by, cv.BALL_RESTING_HEIGHT if r.random() < 0.7 else r.uniform(150, 600)],
+                                 dtype=np.float32)
+        ball.linear_velocity = np.array([r.normal(0, 300), attack_dir * r.uniform(0, 1200), 0.0], dtype=np.float32)
+        ball.angular_velocity = np.zeros(3, dtype=np.float32)
+        goal_y = attack_dir * cv.BACK_WALL_Y
+        for car in state.cars.values():
+            if car.team_num == attacking_team:
+                d = r.uniform(500, 2500)
+                x, y = bx + r.normal(0, 600), by - attack_dir * d
+                yaw = float(np.arctan2(by - y, bx - x) + r.normal(0, 0.4))
+                _place_car(car, x, y, yaw, r.uniform(0, 1500), r.uniform(0, 100))
+            else:
+                f = r.uniform(0.2, 0.9)                         # entre la balle et son but
+                x, y = bx * (1 - f) + r.normal(0, 500), by + (goal_y - by) * f
+                yaw = float(np.arctan2(by - y, bx - x) + r.normal(0, 0.8))
+                _place_car(car, x, y, yaw, r.uniform(0, 1000), r.uniform(0, 100))
+
+
+class AerialBallMutator(StateMutator[GameState]):
+    """Balle en l'air (300-1600 uu) au-dessus d'une voiture tirée au hasard ; les autres voitures au hasard."""
+
+    def __init__(self, seed: Optional[int] = None):
+        self.rng = np.random.default_rng(seed)
+        self.random_state = RandomStateMutator(seed)
+
+    def apply(self, state: GameState, shared_info: Dict[str, Any]) -> None:
+        r = self.rng
+        self.random_state.apply(state, shared_info)
+        cars = list(state.cars.values())
+        car = cars[int(r.integers(len(cars)))]
+        p = car.physics.position
+        state.ball.position = np.array([np.clip(p[0] + r.normal(0, 400), -3500, 3500),
+                                        np.clip(p[1] + r.normal(0, 400), -4500, 4500),
+                                        r.uniform(300, 1600)], dtype=np.float32)
+        state.ball.linear_velocity = (r.normal(0, 300, 3) * np.array([1, 1, 0.5])).astype(np.float32)
+        car.boost_amount = float(r.uniform(30, 100))
+
+
 class StartStateMutator(StateMutator[GameState]):
     """Tire le type d'état de départ (kickoff / random) selon des poids configurables."""
 
@@ -78,6 +137,8 @@ class StartStateMutator(StateMutator[GameState]):
         self.mutators = {
             "kickoff": KickoffMutator(),
             "random": RandomStateMutator(seed),
+            "attack_defense": AttackDefenseMutator(seed),
+            "aerial": AerialBallMutator(seed),
         }
         unknown = set(self.start_weights) - set(self.mutators)
         if unknown:
