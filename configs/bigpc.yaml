@@ -1,0 +1,10 @@
+# Gros PC : longs runs. Ajuster n_workers après scripts/benchmark_sps.py.
+model:
+  d_model: 192
+  n_layers: 2
+ppo:
+  batch_steps: 200_000
+  minibatch_size: 50_000
+  device_chunk: 16_384
+train:
+  checkpoint_every_steps: 10_000_000

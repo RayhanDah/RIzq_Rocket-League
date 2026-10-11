@@ -1,0 +1,82 @@
+# Configuration de base. Les profils (laptop.yaml, bigpc.yaml, debug.yaml) ne surchargent que ce qui change.
+run_name: null                 # null → nom généré (date + algo)
+seed: 42
+
+paths:
+  collision_meshes: collision_meshes   # dossier qui contient soccar/mesh_*.cmf (sortie de RLArenaCollisionDumper)
+  runs_dir: runs
+
+env:
+  # Formats tirés au hasard à chaque épisode (ARCHITECTURE §2). Clés = joueurs par équipe.
+  format_weights: {1: 0.70, 2: 0.20, 3: 0.10}
+  # États de départ (ARCHITECTURE §8)
+  start_weights: {kickoff: 0.5, random: 0.5}
+  action_repeat: 8                  # 8 ticks = ~15 décisions/s
+  no_touch_timeout_s: 15
+  episode_timeout_s: 300
+  rlbot_delay: true                 # reproduit le délai d'1 tick de RLBot (cohérence sim / vrai jeu)
+
+rewards:
+  # Poids de chaque terme (ARCHITECTURE §7). Les termes "brut" sont calculés par agent puis combinés
+  # avec l'esprit d'équipe τ et la soustraction de la moyenne adverse (zéro-somme).
+  weights:
+    goal: 10.0
+    touch: 0.5
+    vel_player_to_ball: 0.05
+    vel_ball_to_goal: 0.15
+    face_ball: 0.01
+    boost_gain: 0.1
+    double_commit: 0.05            # pénalité volontairement faible
+  touch_aerial_bonus: 1.0           # touche à hauteur plafond = x(1+bonus)
+  boost_loss_coef: 0.0              # pénalité de dépense de boost (0 = désactivée)
+  double_commit_radius: 900         # uu autour de la balle
+  double_commit_min_speed: 400      # uu/s vers la balle pour compter comme "engagé"
+  # Décroissance des rewards d'apprentissage des bases : multiplicateur linéaire de 1 → end sur n pas
+  anneal:
+    touch: {end: 0.3, steps: 300_000_000}
+    vel_player_to_ball: {end: 0.0, steps: 200_000_000}
+    face_ball: {end: 0.0, steps: 100_000_000}
+  team_spirit: {start: 0.0, end: 0.3, steps: 300_000_000}
+  zero_sum: 1.0                     # 1.0 = on soustrait la moyenne des récompenses adverses
+
+model:
+  d_model: 128
+  n_heads: 4
+  n_layers: 2
+  ff_mult: 2
+  head_hidden: [256, 256]
+
+ppo:
+  policy_loss: spo                  # spo | ppo  (flag d'ablation, ARCHITECTURE §6)
+  clip_eps: 0.2                     # ε (PPO : clipping ; SPO : rayon de la pénalité quadratique)
+  batch_steps: 100_000              # pas d'agents apprenants collectés par itération
+  minibatch_size: 50_000
+  device_chunk: 8_192               # taille des sous-lots en mémoire (accumulation de gradient)
+  epochs: 2
+  lr_actor: 2.0e-4
+  lr_critic: 2.0e-4
+  gamma: 0.99
+  gae_lambda: 0.95
+  ent_coef: 0.01
+  vf_coef: 1.0
+  max_grad_norm: 0.5
+  device: auto                      # auto | cpu | cuda
+
+selfplay:
+  hist_prob: 0.2                    # part des épisodes joués contre une ancienne version (ARCHITECTURE §9)
+  pool_every_steps: 10_000_000      # fréquence de sauvegarde d'un adversaire dans le pool
+  pool_recent: 20                   # on tire parmi les N versions les plus récentes
+  elo_k: 16
+
+train:
+  n_workers: auto                   # auto = nb de cœurs - 1
+  total_steps: 10_000_000_000       # on s'arrête à la main en pratique
+  checkpoint_every_steps: 5_000_000
+  keep_checkpoints: 5
+  log_every_iters: 1
+  torch_threads: auto               # threads PyTorch du processus principal
+
+logging:
+  wandb: auto                       # auto | online | offline | off
+  wandb_project: rocket-league-agent
+  wandb_entity: null

@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+runs/
+wandb/
+collision_meshes/
+*.egg-info/
+.pytest_cache/
+rlviser.exe
+*.tmp
+.venv-*/
+settings.txt
+
+# Notes et fichiers locaux (non publiés)

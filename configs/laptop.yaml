@@ -1,0 +1,14 @@
+# Petit PC portable : valider le pipeline et lancer les premiers runs.
+ppo:
+  batch_steps: 50_000
+  minibatch_size: 25_000
+  device_chunk: 4_096
+train:
+  # Core Ultra 5 125H (14 cœurs). Collecte seule : 12 workers → 3 758 sps, 16 → 4 008 sps.
+  # L'update (~35 s / 50k steps sur CPU) est le goulot : en collecte asynchrone, 9 workers suffisent
+  # (collecte ~24 s < update) et laissent du CPU à l'apprentissage. Débit total ≈ 1 400 sps (11/10/2026).
+  n_workers: 9
+  async_collect: true           # collecte du lot suivant pendant l'update (1 itération de retard, ratio exact)
+  checkpoint_every_steps: 2_000_000
+selfplay:
+  pool_every_steps: 5_000_000

@@ -1,0 +1,19 @@
+# Run ultra court pour vérifier que tout s'enchaîne (quelques minutes).
+run_name: debug
+model:
+  d_model: 32
+  n_layers: 1
+  head_hidden: [64]
+ppo:
+  batch_steps: 2_000
+  minibatch_size: 1_000
+  device_chunk: 1_000
+  epochs: 1
+train:
+  n_workers: 2
+  total_steps: 10_000
+  checkpoint_every_steps: 4_000
+selfplay:
+  pool_every_steps: 4_000
+logging:
+  wandb: off

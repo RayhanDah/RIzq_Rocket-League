@@ -1,0 +1,7 @@
+# PyTorch s'installe À PART (voir INSTALL.md §3) pour choisir CPU ou CUDA.
+# Versions minimales testées par conception ; figer avec `pip freeze > requirements.lock.txt` une fois que tout tourne.
+numpy>=1.24,<3
+pyyaml>=6
+rlgym[rl-sim]==2.0.1        # API RLGym v2 + sous-module Rocket League + RocketSim (rocketsim>=2,<3)
+wandb>=0.16                 # optionnel : suivi en ligne (le code marche sans)
+pytest>=7
