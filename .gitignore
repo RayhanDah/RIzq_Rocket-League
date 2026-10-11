@@ -12,3 +12,4 @@ rlviser.exe
 settings.txt
 
 # Notes et fichiers locaux (non publiés)
+bot/model.pt

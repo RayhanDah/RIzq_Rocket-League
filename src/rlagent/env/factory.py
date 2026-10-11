@@ -63,13 +63,14 @@ def init_rocketsim(cfg: Dict[str, Any]) -> Path:
     return meshes_dir
 
 
-def build_env(cfg: Dict[str, Any], seed: Optional[int] = None) -> RLGym:
+def build_env(cfg: Dict[str, Any], seed: Optional[int] = None, state_mutator=None) -> RLGym:
+    """state_mutator : remplace le tirage format + état de départ (scénarios d'évaluation)."""
     init_rocketsim(cfg)
     from rlgym.rocket_league.sim import RocketSimEngine
 
     e = cfg["env"]
     return RLGym(
-        state_mutator=MutatorSequence(
+        state_mutator=state_mutator or MutatorSequence(
             RandomFormatMutator(e["format_weights"], seed=seed),
             StartStateMutator(e["start_weights"], seed=None if seed is None else seed + 1),
         ),

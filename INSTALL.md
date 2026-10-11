@@ -82,7 +82,7 @@ RocketSim en 1v1/2v2/3v3 et joue quelques centaines de steps.
 
 ```bash
 python -m rlagent.train --profile debug                       # fumée : 2-5 min
-python scripts/benchmark_sps.py --workers 1 2 4 8             # régler train.n_workers
+python scripts/benchmark_sps.py --workers 2 4 6 --envs 1 4 8  # régler train.n_workers / train.envs_per_worker
 python -m rlagent.train --profile laptop --run-name s1_spo_laptop
 python -m rlagent.train --profile laptop --set ppo.policy_loss=ppo --run-name s1_ppo_laptop   # ablation
 ```
@@ -98,6 +98,7 @@ python -m rlagent.train --profile laptop --set ppo.policy_loss=ppo --run-name s1
 pip install "rlgym[rl-rlviser]==2.0.1"
 python scripts/watch.py --policy runs/<run> --format 1                       # voir le bot (RLViser)
 python scripts/evaluate.py --a runs/<runA> --b runs/<runB> --format 1 --games 50   # matchs simulés
+python scripts/evaluate.py --a runs/<run> --scenario empty_goal --trials 200      # critère S1-20 (but vide)
 ```
 
 ---
@@ -105,9 +106,16 @@ python scripts/evaluate.py --a runs/<runA> --b runs/<runB> --format 1 --games 50
 ## 8. RLBot v5 (vrai jeu) — **gros PC Windows uniquement**
 
 1. Installer **RLBot v5** en suivant le wiki officiel (https://wiki.rlbot.org/v5/).
-2. Dans le venv : `pip install rlgym-rlbot` (il fixe sa version de `rlbot`).
-3. `python scripts/export_bot.py --run runs/<run>` → crée `bot/model.pt`.
-4. Ajouter le dossier `bot/` dans RLBot (fichier `bot/bot.toml`, **à valider avec le wiki v5**).
+2. Créer un **venv dédié au bot** (séparé du venv d'entraînement : `rlgym-rlbot` impose ses versions de `rlbot`) :
+   ```bash
+   py -3.12 -m venv .venv-bot
+   .venv-bot\Scripts\python -m pip install rlgym-rlbot
+   .venv-bot\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+   .venv-bot\Scripts\python -m pip install -e .
+   ```
+   Testé le 12/10/2026 : rlgym-rlbot 0.3.0, rlbot 2.0.0b52 ; `bot/bot.py` se charge et joue sur une observation.
+3. `python scripts/export_bot.py --run runs/<run>` → crée `bot/model.pt` (non versionné).
+4. Ajouter le dossier `bot/` dans RLBot (`bot/bot.toml`, format v5 vérifié avec le wiki ; `run_command` utilise `.venv-bot`).
 5. Ajouter au botpack les bots de référence : Psyonix (Rookie → All-Star), Necto, Nexto.
 
 > ⚠️ Jamais en ligne. RLBot lance le jeu dans un mode hors ligne.

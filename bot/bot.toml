@@ -1,14 +1,16 @@
-# Configuration RLBot v5 — À VALIDER avec https://wiki.rlbot.org/v5/botmaking/config-files/ (le format peut évoluer).
+#:schema https://rlbot.org/schemas/agent.json
+# Configuration RLBot v5 — format vérifié le 12/10/2026 avec https://wiki.rlbot.org/v5/botmaking/config-files/
 [settings]
-name = "RLAgent"
 agent_id = "ensisa/rlagent/v0.1"
-root_dir = ""
-# Adapter le chemin vers le Python du venv du projet :
-run_command = "..\\.venv\\Scripts\\python.exe bot.py"
-run_command_linux = "../.venv/bin/python bot.py"
+name = "RLAgent"
+# run_command est lancé depuis ce dossier (bot/). Venv dédié au bot : rlgym-rlbot + torch + rlagent
+# (voir INSTALL.md §8) ; il est séparé du venv d'entraînement car rlgym-rlbot impose ses propres versions.
+run_command = "..\\.venv-bot\\Scripts\\python.exe bot.py"
+run_command_linux = "../.venv-bot/bin/python bot.py"
+hivemind = false
 
 [details]
 description = "Agent RL (PPO/SPO, acteur à attention) entraîné avec RLGym v2 + RocketSim. Hors ligne uniquement."
 developer = "Équipe projet RL — ENSISA"
-language = "python"
+language = "rlgym"
 tags = ["1v1", "teamplay"]

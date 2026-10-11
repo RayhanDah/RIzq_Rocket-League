@@ -17,6 +17,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, nargs="+", default=[1, 2, 4])
     ap.add_argument("--steps", type=int, default=20_000)
+    ap.add_argument("--envs", type=int, nargs="+", default=[1], help="arènes par worker (train.envs_per_worker)")
     ap.add_argument("--profile", action="append", default=[])
     args = ap.parse_args()
 
@@ -31,8 +32,8 @@ def main():
     actor, _ = build_models(cfg, N_ACTIONS)
     torch.set_num_threads(int(cfg["train"]["torch_threads"]))
     results = []
-    for w in args.workers:
-        col = Collector(cfg, w, seed=0)
+    for w, e in [(w, e) for w in args.workers for e in args.envs]:
+        col = Collector(cfg, w, seed=0, envs_per_worker=e)
         try:
             col.collect(actor, 1_000, torch.device("cpu"))  # chauffe
             t = time.perf_counter()
@@ -40,11 +41,12 @@ def main():
             sps = n / (time.perf_counter() - t)
         finally:
             col.close()
-        results.append((w, sps))
-        print(f"workers={w:3d} → {sps:,.0f} steps/s (inférence acteur incluse, CPU)")
-    best = max(results, key=lambda r: r[1])
-    print(f"\nMeilleur : {best[0]} workers ({best[1]:,.0f} steps/s). "
-          f"À reporter dans configs/<profil>.yaml → train.n_workers")
+        results.append((w, e, sps))
+        print(f"workers={w:3d} arènes/worker={e:2d} → {sps:,.0f} steps/s (inférence acteur incluse, CPU)",
+              flush=True)
+    best = max(results, key=lambda r: r[2])
+    print(f"\nMeilleur : {best[0]} workers x {best[1]} arènes ({best[2]:,.0f} steps/s). "
+          f"À reporter dans configs/<profil>.yaml → train.n_workers / train.envs_per_worker")
 
 
 if __name__ == "__main__":

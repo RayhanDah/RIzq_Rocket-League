@@ -146,3 +146,66 @@ def test_ppo_update_runs_and_improves_on_bandit():
             assert np.isfinite(stats["policy_loss"]) and np.isfinite(stats["value_loss"])
         p_after = torch.softmax(actor(torch.as_tensor(x)), -1)[0, 7].item()
         assert p_after > max(0.1, 4 * p_before), (kind, p_before, p_after)
+
+
+def _mixed_format_obs(n: int, seed: int = 0) -> np.ndarray:
+    """Observations réelles de formats mélangés (1v1/2v2/3v3), comme dans un lot d'entraînement."""
+    from helpers import make_state
+    from rlagent.env.obs import AttentionObs
+    rng = np.random.default_rng(seed)
+    rows = []
+    builder = AttentionObs()
+    while len(rows) < n:
+        size = int(rng.choice([1, 2, 3], p=[0.7, 0.2, 0.1]))
+        s = make_state(size, kickoff=True, seed=int(rng.integers(1000)))
+        for c in s.cars.values():
+            c.physics.position = (c.physics.position + rng.normal(0, 500, 3)).astype(np.float32)
+            c.physics.linear_velocity = rng.normal(0, 800, 3).astype(np.float32)
+            c.physics.euler_angles = rng.uniform(-np.pi, np.pi, 3).astype(np.float32)
+        s.ball.position = rng.uniform(-2000, 2000, 3).astype(np.float32)
+        rows.extend(builder.build_obs(list(s.cars), s, {}).values())
+    return np.stack(rows[:n]).astype(np.float32)
+
+
+def test_skip_padding_matches_padded_forward_and_gradients():
+    """Ne calculer que les jetons réels doit donner les MÊMES sorties et les MÊMES gradients."""
+    from rlagent.algo.losses import policy_loss
+    from rlagent.models.attention import build_models
+    torch.manual_seed(0)
+    actor, critic = build_models(load_config_default(), 90)
+    x = torch.as_tensor(_mixed_format_obs(300))
+    for mode in ("eval", "train"):
+        getattr(actor, mode)(); getattr(critic, mode)()
+        for enc_owner in (actor, critic):
+            enc = enc_owner.encoder
+            fast = enc(x)
+            ref = enc.forward_padded(x)
+            assert torch.allclose(fast, ref, atol=1e-5), (fast - ref).abs().max()
+    # gradients d'une vraie perte PPO/SPO + valeur
+    actor.train(); critic.train()
+    a = torch.randint(0, 90, (300,))
+    adv = torch.randn(300)
+    grads = {}
+    for skip in (True, False):
+        actor.zero_grad(); critic.zero_grad()
+        actor.encoder.skip_padding = critic.encoder.skip_padding = skip
+        d = actor.dist(x)
+        loss = policy_loss(d.log_prob(a), d.log_prob(a).detach() + 0.1, adv, 0.2, "spo") + critic(x).pow(2).mean()
+        loss.backward()
+        grads[skip] = [p.grad.clone() for p in list(actor.parameters()) + list(critic.parameters())]
+    for g1, g0 in zip(grads[True], grads[False]):
+        assert torch.allclose(g1, g0, atol=1e-5, rtol=1e-4), (g1 - g0).abs().max()
+
+
+def test_skip_padding_falls_back_for_non_prefix_masks():
+    from rlagent.models.attention import build_models
+    actor, _ = build_models(load_config_default(), 90)
+    actor.eval()
+    x = torch.as_tensor(_mixed_format_obs(300))
+    x[:, -5:] = torch.tensor([1.0, 0.0, 1.0, 0.0, 0.0])  # masque non préfixe → chemin d'origine
+    assert torch.allclose(actor.encoder(x), actor.encoder.forward_padded(x))
+
+
+def load_config_default():
+    from rlagent.config import load_config
+    return load_config(["laptop"])

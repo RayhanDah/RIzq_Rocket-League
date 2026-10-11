@@ -65,3 +65,20 @@ def test_config_profiles_and_overrides():
     assert isinstance(cfg["train"]["n_workers"], int)
     for p in ("laptop", "bigpc"):
         load_config([p])
+
+
+def test_empty_goal_scenario():
+    """S1-20 : 1v1, balle immobile dans la moitié adverse, bleu derrière la balle, orange loin de son but."""
+    from rlagent.env.mutators import EmptyGoalMutator
+    m = EmptyGoalMutator(seed=0)
+    for _ in range(200):
+        s = _empty_state()
+        info = {}
+        m.apply(s, info)
+        assert info["team_size"] == 1 and len(s.cars) == 2
+        b = s.ball.position
+        assert 0 <= b[1] <= 3500 and abs(b[0]) <= 2500 and np.allclose(s.ball.linear_velocity, 0)
+        blue = s.cars["blue-0"].physics.position
+        orange = s.cars["orange-0"].physics.position
+        assert blue[1] < b[1] and abs(blue[0]) <= 3800
+        assert orange[1] < -4000  # garé dans le camp bleu, loin du but orange (+Y)

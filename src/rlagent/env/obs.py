@@ -61,6 +61,33 @@ def _car_state(car: Car, inverted: bool) -> np.ndarray:
     ]).astype(np.float32)
 
 
+def _perspective(state: GameState, cars: List[Car], scalars: np.ndarray, inverted: bool) -> Dict[str, np.ndarray]:
+    """Tableaux (n voitures) dans une perspective d'équipe : positions, vitesses, rotations, états, bloc global."""
+    phys = [car_phys(c, inverted) for c in cars]
+    pos = np.array([p.position for p in phys], dtype=np.float32).reshape(-1, 3)
+    vel = np.array([p.linear_velocity for p in phys], dtype=np.float32).reshape(-1, 3)
+    ang = np.array([p.angular_velocity for p in phys], dtype=np.float32).reshape(-1, 3)
+    rot = np.array([p.rotation_mtx for p in phys], dtype=np.float32).reshape(-1, 3, 3)
+    car_state = np.concatenate([
+        pos * POS_COEF, rot[:, :, 0], rot[:, :, 2], vel * CAR_VEL_COEF, ang * ANG_VEL_COEF, scalars,
+    ], axis=1).astype(np.float32)
+    ball = ball_phys(state, inverted)
+    ball_pos = np.asarray(ball.position, dtype=np.float32)
+    ball_vel = np.asarray(ball.linear_velocity, dtype=np.float32)
+    pads = state.inverted_boost_pad_timers if inverted else state.boost_pad_timers
+    glob = np.concatenate([
+        ball_pos * POS_COEF,
+        ball_vel * BALL_VEL_COEF,
+        np.asarray(ball.angular_velocity, dtype=np.float32) * BALL_ANG_VEL_COEF,
+        np.asarray(pads, dtype=np.float32) * PAD_COEF,
+        (OPP_GOAL_BACK - ball_pos) * REL_COEF,
+        (OWN_GOAL_BACK - ball_pos) * REL_COEF,
+    ]).astype(np.float32)
+    ball_dist = (np.linalg.norm(ball_pos[None, :] - pos, axis=1) * REL_COEF).astype(np.float32)
+    return {"pos": pos, "vel": vel, "rot": rot, "car_state": car_state, "ball_pos": ball_pos,
+            "ball_vel": ball_vel, "global": glob, "ball_dist": ball_dist}
+
+
 class AttentionObs(ObsBuilder[str, np.ndarray, GameState, Tuple[str, int]]):
     def get_obs_space(self, agent: str) -> Tuple[str, int]:
         return "real", OBS_DIM
@@ -69,6 +96,90 @@ class AttentionObs(ObsBuilder[str, np.ndarray, GameState, Tuple[str, int]]):
         pass
 
     def build_obs(self, agents: List[str], state: GameState, shared_info: Dict[str, Any]) -> Dict[str, np.ndarray]:
+        """Version optimisée : mêmes valeurs que `build_obs_reference` (test d'équivalence).
+
+        Les états des voitures sont calculés une fois par perspective (bleu / orange) au lieu d'une fois
+        par couple (agent, autre voiture), et les jetons des autres voitures sont construits en bloc.
+        """
+        if len(state.cars) <= 2:  # 1v1 : la version d'origine est plus rapide (moins de surcoût numpy)
+            return self.build_obs_reference(agents, state, shared_info)
+        ids = sorted(state.cars.keys(), key=str)
+        cars = [state.cars[a] for a in ids]
+        n = len(ids)
+        index = {a: i for i, a in enumerate(ids)}
+        teams = np.array([c.team_num for c in cars])
+        ranks = team_proximity_ranks(state)
+        rank_arr = np.array([ranks.get(a, 0) for a in ids], dtype=np.float32) / 2.0
+        kickoff = float(is_kickoff_state(state))
+        prev_actions = shared_info.get("prev_actions", {})
+        team_sizes: Dict[int, int] = {}
+        for c in cars:
+            team_sizes[c.team_num] = team_sizes.get(c.team_num, 0) + 1
+        scalars = np.array([[c.boost_amount / 100.0, float(c.on_ground), min(c.demo_respawn_timer, 3.0) / 3.0,
+                             float(c.is_boosting), float(c.is_supersonic), float(c.has_flip)] for c in cars],
+                           dtype=np.float32).reshape(n, 6)
+
+        persp: Dict[bool, Dict[str, np.ndarray]] = {}
+        out: Dict[str, np.ndarray] = {}
+        for agent in agents:
+            i = index[agent]
+            car = cars[i]
+            inv = car.team_num == cv.ORANGE_TEAM
+            p = persp.get(inv)
+            if p is None:
+                p = persp[inv] = _perspective(state, cars, scalars, inv)
+            pos, vel, rot = p["pos"], p["vel"], p["rot"][i]
+            ball_pos, ball_vel = p["ball_pos"], p["ball_vel"]
+            rel_ball = ball_pos - pos[i]
+            n_mates = team_sizes.get(car.team_num, 1)
+            n_opps = sum(v for k, v in team_sizes.items() if k != car.team_num)
+            prev = prev_actions.get(agent)
+            if prev is None:
+                prev = np.zeros(8, dtype=np.float32)
+
+            vec = np.empty(OBS_DIM, dtype=np.float32)
+            o = 0
+            vec[o:o + CAR_STATE_DIM] = p["car_state"][i]; o += CAR_STATE_DIM
+            vec[o:o + 3] = (rot.T @ vel[i]) * CAR_VEL_COEF; o += 3
+            vec[o:o + 10] = (float(car.has_jumped), float(car.is_jumping), float(car.has_flipped),
+                             float(car.is_flipping), float(car.has_double_jumped), float(car.can_flip),
+                             min(car.air_time_since_jump, 1.25) / 1.25, min(car.jump_time, 0.2) / 0.2,
+                             float(car.handbrake), float(car.is_holding_jump)); o += 10
+            vec[o:o + 3] = rel_ball * REL_COEF; o += 3
+            vec[o:o + 3] = (rot.T @ rel_ball) * REL_COEF; o += 3
+            vec[o:o + 3] = (ball_vel - vel[i]) * BALL_VEL_COEF; o += 3
+            vec[o] = np.linalg.norm(rel_ball) * REL_COEF; o += 1
+            vec[o:o + 8] = np.asarray(prev, dtype=np.float32).reshape(-1)[:8]; o += 8
+            vec[o:o + 4] = (rank_arr[i], n_mates / 3.0, n_opps / 3.0, kickoff); o += 4
+            vec[o:o + GLOBAL_DIM] = p["global"]; o += GLOBAL_DIM
+
+            # autres voitures : coéquipiers d'abord, puis adversaires, chacun dans l'ordre des ids
+            others = [j for j in range(n) if j != i and teams[j] == car.team_num] +                      [j for j in range(n) if j != i and teams[j] != car.team_num]
+            others = others[:MAX_OTHERS]
+            block = np.zeros((MAX_OTHERS, OTHER_DIM), dtype=np.float32)
+            k = len(others)
+            if k:
+                js = np.array(others)
+                is_mate = (teams[js] == car.team_num).astype(np.float32)
+                rel = pos[js] - pos[i]
+                block[:k, 0] = is_mate
+                block[:k, 1] = 1.0 - is_mate
+                c = 2
+                block[:k, c:c + CAR_STATE_DIM] = p["car_state"][js]; c += CAR_STATE_DIM
+                block[:k, c:c + 3] = rel * REL_COEF; c += 3
+                block[:k, c:c + 3] = (vel[js] - vel[i]) * CAR_VEL_COEF; c += 3
+                block[:k, c:c + 3] = (rel @ rot) * REL_COEF; c += 3
+                block[:k, c] = p["ball_dist"][js]; c += 1
+                block[:k, c] = rank_arr[js]
+            vec[o:o + MAX_OTHERS * OTHER_DIM] = block.reshape(-1); o += MAX_OTHERS * OTHER_DIM
+            vec[o:o + MAX_OTHERS] = 0.0
+            vec[o:o + k] = 1.0
+            out[agent] = vec
+        return out
+
+    def build_obs_reference(self, agents: List[str], state: GameState,
+                            shared_info: Dict[str, Any]) -> Dict[str, np.ndarray]:
+        """Implémentation d'origine (lisible, lente), conservée comme référence pour les tests d'équivalence."""
         ranks = team_proximity_ranks(state)
         kickoff = float(is_kickoff_state(state))
         prev_actions = shared_info.get("prev_actions", {})

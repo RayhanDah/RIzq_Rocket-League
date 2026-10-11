@@ -64,3 +64,44 @@ def test_prev_action_in_obs():
     with_prev = _obs(s, prev)["blue-0"]
     without = _obs(s)["blue-0"]
     assert not np.allclose(with_prev, without)
+
+
+def _random_state(size: int, seed: int):
+    """État quelconque (positions, vitesses, rotations, scalaires, pads) pour comparer deux implémentations."""
+    from rlagent.env.mutators import RandomStateMutator
+    rng = np.random.default_rng(seed)
+    s = make_state(size, kickoff=False, seed=seed)
+    RandomStateMutator(seed).apply(s, {})
+    for c in s.cars.values():
+        c.physics.euler_angles = rng.uniform(-np.pi, np.pi, 3).astype(np.float32)
+        c.physics.position = (c.physics.position + rng.normal(0, 200, 3)).astype(np.float32)
+        c.physics.angular_velocity = rng.normal(0, 2, 3).astype(np.float32)
+        c.on_ground = bool(rng.random() < 0.5)
+        c.has_jumped = bool(rng.random() < 0.5)
+        c.is_holding_jump = bool(rng.random() < 0.5)
+        c.air_time_since_jump = float(rng.uniform(0, 2))
+        c.jump_time = float(rng.uniform(0, 0.3))
+        c.demo_respawn_timer = float(rng.choice([0.0, rng.uniform(0, 3)]))
+        c.boost_amount = float(rng.uniform(0, 100))
+    s.boost_pad_timers = rng.uniform(0, 10, 34).astype(np.float32)
+    return s
+
+
+def test_vectorized_obs_matches_reference():
+    """L'implémentation rapide doit donner les MÊMES observations que l'implémentation d'origine."""
+    builder = AttentionObs()
+    rng = np.random.default_rng(0)
+    for size in (1, 2, 3):
+        for seed in range(15):
+            s = make_state(size, seed=seed) if seed % 3 == 0 else _random_state(size, seed)
+            agents = list(s.cars.keys())
+            info = {"prev_actions": {a: rng.uniform(-1, 1, 8).astype(np.float32) for a in agents[::2]}}
+            fast = builder.build_obs(agents, s, info)
+            ref = builder.build_obs_reference(agents, s, info)
+            assert fast.keys() == ref.keys()
+            for a in agents:
+                assert fast[a].dtype == np.float32 and fast[a].shape == (OBS_DIM,)
+                np.testing.assert_allclose(fast[a], ref[a], rtol=1e-5, atol=1e-6, err_msg=f"{size}v{size} {a}")
+            # sous-ensemble d'agents (cas des tests et de RLBot)
+            sub = builder.build_obs(agents[:1], s, info)
+            np.testing.assert_allclose(sub[agents[0]], ref[agents[0]], rtol=1e-5, atol=1e-6)

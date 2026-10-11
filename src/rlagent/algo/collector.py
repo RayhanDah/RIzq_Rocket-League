@@ -53,26 +53,30 @@ class WorkerError(RuntimeError):
 
 class Collector:
     def __init__(self, cfg: Dict[str, Any], n_workers: int, seed: int, pool=None,
-                 build_actor_fn: Optional[Callable] = None):
+                 build_actor_fn: Optional[Callable] = None, envs_per_worker: Optional[int] = None):
         self.cfg = cfg
         self.pool = pool
         self.build_actor_fn = build_actor_fn
         self.hist_prob = float(cfg["selfplay"]["hist_prob"])
         self.rng = random.Random(seed)
+        # Plusieurs arènes par worker : lots d'inférence plus gros, moins d'allers-retours entre processus.
+        self.envs_per_worker = int(envs_per_worker or cfg["train"].get("envs_per_worker", 1) or 1)
         ctx = mp.get_context("spawn")  # identique sous Windows / Linux / macOS
         self.conns = []
         self.procs = []
         for i in range(n_workers):
             parent, child = ctx.Pipe()
-            p = ctx.Process(target=worker_main, args=(child, cfg, seed + 1000 * (i + 1), i), daemon=True)
+            p = ctx.Process(target=worker_main, args=(child, cfg, seed + 1000 * (i + 1), i, self.envs_per_worker),
+                            daemon=True)
             p.start()
             child.close()
             self.conns.append(parent)
             self.procs.append(p)
+        # slots[w * envs_per_worker + e] = arène e du worker w
         self.slots: List[EnvSlot] = []
-        for i, conn in enumerate(self.conns):
-            start = self._recv(i, timeout=300)
-            self.slots.append(self._new_slot(start))
+        for i in range(len(self.conns)):
+            for start in self._recv(i, timeout=300):
+                self.slots.append(self._new_slot(start))
         self.finished_episodes: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------ utils
@@ -155,11 +159,14 @@ class Collector:
                 for k, (w, j) in enumerate(rows):
                     actions[w][j] = int(h_act[k])
 
-            # 4) Step en parallèle
+            # 4) Step en parallèle (chaque worker fait avancer ses arènes)
+            E = self.envs_per_worker
             for w, conn in enumerate(self.conns):
-                conn.send(("step", actions[w]))
+                conn.send(("step", actions[w * E:(w + 1) * E]))
+            results: List[StepResult] = []
             for w in range(len(self.conns)):
-                res: StepResult = self._recv(w)
+                results.extend(self._recv(w))
+            for w, res in enumerate(results):
                 slot = self.slots[w]
                 learn = slot.learning_mask()
                 for j in range(len(slot.episode.agents)):

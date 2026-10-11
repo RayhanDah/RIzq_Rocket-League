@@ -71,6 +71,25 @@ def test_collector_trajectories_consistent():
         assert len(t.obs) == len(t.actions) == len(t.log_probs) == len(t.rewards) > 0
 
 
+def test_collector_multiple_envs_per_worker():
+    """Plusieurs arènes par worker : chaque arène est un slot indépendant, trajectoires cohérentes."""
+    from rlagent.algo.collector import Collector
+    from rlagent.env.actions import N_ACTIONS
+    from rlagent.models.attention import build_models
+    cfg = _fake_cfg()
+    actor, _ = build_models(cfg, N_ACTIONS)
+    col = Collector(cfg, 2, seed=0, envs_per_worker=3)
+    try:
+        assert len(col.slots) == 6
+        trajs, episodes, n, _ = col.collect(actor, 4000, torch.device("cpu"))
+    finally:
+        col.close()
+    assert n >= 4000 and sum(len(t) for t in trajs) == n
+    for t in trajs:
+        assert len(t.obs) == len(t.actions) == len(t.log_probs) == len(t.rewards) > 0
+    assert episodes  # des épisodes se terminent dans plusieurs arènes
+
+
 def test_short_training_run_end_to_end(tmp_path):
     """Entraînement court sur moteur factice : checkpoints, pool, reprise, métriques, pas de NaN."""
     import json
@@ -99,7 +118,7 @@ def test_async_collect_training_run(tmp_path):
     import json
     from rlagent.train import find_latest_checkpoint, train
     cfg = _fake_cfg(train={"n_workers": 2, "total_steps": 8000, "checkpoint_every_steps": 3000,
-                           "async_collect": True},
+                           "async_collect": True, "envs_per_worker": 2},
                     selfplay={"pool_every_steps": 2000, "hist_prob": 0.5})
     cfg["run_name"] = "pytest_fake_async"
     run_dir = tmp_path / "run"

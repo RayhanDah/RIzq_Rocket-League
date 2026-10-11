@@ -87,3 +87,37 @@ class StartStateMutator(StateMutator[GameState]):
         kind = _weighted_choice(self.start_weights, self.rng)
         self.mutators[kind].apply(state, shared_info)
         shared_info["start_kind"] = kind
+
+
+class EmptyGoalMutator(StateMutator[GameState]):
+    """Scénario « but vide » (critère S1-20) : 1v1, balle immobile au sol dans la moitié adverse, voiture bleue
+    derrière la balle, voiture orange garée loin de son but (coin du camp bleu). Elle ne bouge pas pendant l'éval.
+    """
+
+    def __init__(self, seed: Optional[int] = None):
+        self.rng = np.random.default_rng(seed)
+
+    def apply(self, state: GameState, shared_info: Dict[str, Any]) -> None:
+        r = self.rng
+        FixedTeamSizeMutator(blue_size=1, orange_size=1).apply(state, shared_info)
+        shared_info["team_size"] = 1
+        shared_info["start_kind"] = "empty_goal"
+        ball = state.ball
+        bx, by = r.uniform(-2500, 2500), r.uniform(0, 3500)
+        ball.position = np.array([bx, by, cv.BALL_RESTING_HEIGHT], dtype=np.float32)
+        ball.linear_velocity = np.zeros(3, dtype=np.float32)
+        ball.angular_velocity = np.zeros(3, dtype=np.float32)
+        for car in state.cars.values():
+            car.physics.linear_velocity = np.zeros(3, dtype=np.float32)
+            car.physics.angular_velocity = np.zeros(3, dtype=np.float32)
+            car.boost_amount = 33.0
+            if car.team_num == cv.BLUE_TEAM:
+                dist, ang = r.uniform(800, 2500), r.uniform(-np.pi / 3, np.pi / 3)
+                x = float(np.clip(bx - dist * np.sin(ang), -3800, 3800))
+                y = float(np.clip(by - dist * np.cos(ang), -4800, 4800))
+                car.physics.position = np.array([x, y, 17.0], dtype=np.float32)
+                yaw = float(np.arctan2(by - y, bx - x) + r.uniform(-0.5, 0.5))
+            else:
+                car.physics.position = np.array([3000.0 * r.choice([-1, 1]), -4300.0, 17.0], dtype=np.float32)
+                yaw = float(r.uniform(-np.pi, np.pi))
+            car.physics.euler_angles = np.array([0.0, yaw, 0.0], dtype=np.float32)
