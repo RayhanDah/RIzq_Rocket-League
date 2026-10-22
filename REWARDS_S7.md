@@ -174,3 +174,16 @@ Coût : collecte −6 % (10 049 contre 10 707 steps/s, 10 workers × 12 arènes)
   ne répond toujours pas. Hypothèse : état d'Adam (2e moment) hérité des minibatchs bruités de s7e. Pistes à décider :
   optimiseur neuf, `lr_max` plus haut, plus d'epochs. Matchs 1v1 12 × 120 s : contre s6 0 V / 12 D (buts 3-49 ;
   déterministe 3-42), contre s7e 6 V / 2 D / 4 N (20-12). Détails : `runs/s7f_spo_kaggle/RAPPORT.md`.
+- **22/10/2026, bilan du projet + phase 0 (banc d'essai de l'optimiseur, aucun run lancé).** Mesure sur les versions
+  du pool : sans weight decay, la norme des couches suivies d'une LayerNorm grossit sans limite (lignée s6 : 22,7 → 57,8)
+  et leur rotation par million de steps baisse à lr constant (4,3° → 2,2°). s7f faisait 8 pas d'Adam par million de
+  steps contre 80 pour s7e. Banc d'essai sur s6 (`scripts/bench_optimizer.py`, 2 M steps puis 76 updates rejouées) :
+  - sur une itération, le KL répond bien au lr (≈ ×4 quand on double), mais il fallait 2,7e-3 pour la cible de 0,01 :
+    le plafond à 1e-3 a bridé s4 à s6 ;
+  - un lot de 300 k donne 2× le gain en validation du lot de 50 k à KL égal ;
+  - un Adam neuf fait perdre du gain ;
+  - normes remises + Adam hérité remis à l'échelle (lot 300 k, lr 1e-3) donne le meilleur gain robuste, sans changer
+    le jeu (KL de la remise 8·10⁻⁹).
+
+  Détails : `runs/s6_spo_kaggle/BANC_OPTIMISEUR.md`. Proposition de phase 1 (décision PO) : `s8` depuis s6 avec ces
+  réglages et un témoin sans contrôle des normes.
