@@ -19,6 +19,7 @@ def main():
     ap.add_argument("--steps", type=int, default=20_000)
     ap.add_argument("--envs", type=int, nargs="+", default=[1], help="arènes par worker (train.envs_per_worker)")
     ap.add_argument("--profile", action="append", default=[])
+    ap.add_argument("--threads", type=int, default=None, help="threads PyTorch d'inférence (défaut : config)")
     args = ap.parse_args()
 
     import torch
@@ -30,7 +31,7 @@ def main():
     cfg = load_config(args.profile)
     cfg["selfplay"]["hist_prob"] = 0.0
     actor, _ = build_models(cfg, N_ACTIONS)
-    torch.set_num_threads(int(cfg["train"]["torch_threads"]))
+    torch.set_num_threads(args.threads or int(cfg["train"]["torch_threads"]))
     results = []
     for w, e in [(w, e) for w in args.workers for e in args.envs]:
         col = Collector(cfg, w, seed=0, envs_per_worker=e)

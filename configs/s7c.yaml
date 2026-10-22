@@ -1,0 +1,13 @@
+# Run « s7c » : s7b repris DE ZÉRO avec tous ses correctifs (1-7) dès le départ + aides vers la balle allongées
+# (décision PO du 21/10/2026). À EMPILER APRÈS s7 et s7b.
+#   .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile s7 --profile s7b --profile s7c --run-name s7c_spo_laptop
+# s7b (32 M steps) : correctifs 4-7 appliqués seulement à 29 M ; ~10 touches/min depuis 25 M contre ~18 pour s4,
+# plateau qui commence quand vitesse vers la balle et orientation s'éteignent (30 M et 20 M, contre 200 M et 100 M
+# dans s4).
+#  8) Aides vers la balle sur le calendrier de s4 : vitesse vers la balle 0,05 → 0 sur 200 M, orientation 0,01 → 0
+#     sur 100 M. Avant 10 M steps, presque rien ne change : la comparaison avec s4 à 5 et 10 M teste les correctifs 4-7.
+# Critères face à s4 (touches/min) : ≥ 4 à 5 M (s4 5,0), ≥ 9 à 10 M (s4 10,6), ≥ 15 à 20 M (s4 18,1).
+rewards:
+  anneal:
+    vel_player_to_ball: {end: 0.0, steps: 200_000_000}
+    face_ball: {end: 0.0, steps: 100_000_000}

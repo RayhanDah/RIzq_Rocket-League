@@ -61,7 +61,7 @@ def rocketsim_info():
 
 def rlagent_info():
     importlib.import_module("rlagent.train")
-    from rlagent.env.obs import OBS_DIM
+    from rlagent.env.obs import OBS_DIM  # sans prédiction de balle
     from rlagent.env.actions import N_ACTIONS
     return f"package rlagent OK (obs={OBS_DIM}, actions={N_ACTIONS})"
 

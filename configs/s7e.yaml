@@ -1,0 +1,64 @@
+# Run « s7e » : agent complet (décision PO du 22/10/2026). À EMPILER APRÈS s7, s7b, s7c et s7d. NOUVEAU run, démarrage à
+# chaud depuis s7c_spo_kaggle (72 M steps, ses poids, son optimiseur, son compteur de steps et son pool).
+#   Kaggle  : PROFILES = "s7 s7b s7c s7d s7e", RUN_NAME = "s7e_spo_kaggle", dataset rl-agent-init fait par
+#             python scripts/make_cloud_bundle.py --init runs/s7c_spo_kaggle --anchors-from s7 s7b s7c s7d s7e
+#   Portable : .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile s7 --profile s7b --profile s7c --profile s7d --profile s7e --run-name s7e_spo_laptop
+# Diagnostic : runs/s7c_spo_kaggle/RAPPORT.md (0 V / 12 D contre s6, buts 11-46 ; lr au plafond dans 100 % des itérations).
+#
+#  E1) Apprentissage débridé : lr de l'acteur au plafond (1e-3) dans 99-100 % des itérations de TOUS les runs depuis s3,
+#      KL final médian 0,0016 pour une cible de 0,01. Plafond 1e-3 → 3e-3 (le contrôleur adaptive_kl reprend la main ;
+#      garde-fou kl_stop inchangé). Lot gardé à 100 000 steps au-delà de 80 M (200 000 diviserait encore par 2 le
+#      nombre d'updates par step).
+#  E2) Horizon long : γ 0,99 → 0,995 (~13 s au lieu de ~6,7 s), comme prévu par s7 une fois les bases acquises (il marque
+#      1,4 but/min). Gestion du boost, défense, constructions. Les potentiels suivent le γ de la config.
+#  E3) Adversaires fixes + self-play priorisé : s4, s5, s6 et s7c laptop toujours tirables, en priorité ceux qui nous
+#      battent ((1 − p_victoire)², 30 % uniforme). 30 % des épisodes contre l'historique, dont la moitié contre une ancre
+#      (15 % des épisodes). Suivi continu : vs_anchor/<run>/p_win.
+#  E4) Mobilité : nouveau reward `flip_speed` (flip avant, speedflip, wavedash, half-flip) = gain de vitesse vers la balle
+#      apporté par le flip lui-même, au-delà du record de la dernière seconde, boost déduit (env/rewards.py).
+#  E5) Boost : 3 pads « à prendre » dans les observations (2 gros, 1 petit, repère de la voiture, `env.boost_features`,
+#      couche d'entrée élargie à poids nuls) ; ramassage (boost_gain) maintenu au lieu de s'éteindre de 60 à 120 M.
+#  E6) Aérien : touche aérienne 1,5 → 3, aide d'approche en l'air 0,03 → 0,06 (sa décroissance continue).
+#  E7) Défense aérienne refaite en rendez-vous (env/mutators.py) : l'ancien niveau 0 était irréalisable (0 % de réussite
+#      et 0 % de touche, comme une voiture immobile). Part 0,04 → 0,06 ; exercice « peu de boost » 0,03 → 0,05.
+#  E8) Attaque : frappe vers le but adverse payée (`shot` 0,5 : gain de vitesse de la balle dans l'axe du but à chaque
+#      touche, négatif si on la renvoie vers notre but).
+# À juger après 10 M steps (82 M) puis 20 M : voir REWARDS_S7.md §9.
+train:
+  init_from: runs/s7c_spo_kaggle
+
+env:
+  boost_features: true              # E5
+  start_weights:                    # E7 (total des exercices 0,40 au lieu de 0,35)
+    kickoff: 0.33
+    random: 0.27
+    drill_aerial: 0.10
+    drill_aerial_defense: 0.06
+    drill_defense: 0.07
+    drill_shot: 0.05
+    drill_wall: 0.03
+    drill_low_boost: 0.05
+    drill_recovery: 0.04
+
+rewards:
+  weights:
+    aerial_touch: 3.0               # E6
+    air_approach: 0.06              # E6
+    flip_speed: 0.25                # E4 : 0,25 pour +500 uu/s
+    shot: 0.5                       # E8
+  anneal:
+    boost_gain: {begin: 0, end: 1.0, steps: 1}                     # E5 : plus de décroissance
+    flip_speed: {begin: 72_000_000, end: 0.4, steps: 150_000_000}  # E4 : 0,25 → 0,1 de 72 à 222 M
+
+ppo:
+  gamma: 0.995                      # E2
+  lr_max: 3.0e-3                    # E1
+  batch_schedule:                   # E1 : [step, batch_steps, minibatch_size]
+    - [0, 50_000, 25_000]
+    - [25_000_000, 100_000, 50_000]
+
+selfplay:                           # E3
+  hist_prob: 0.3
+  pfsp: true
+  anchors: [runs/s4_spo_laptop, runs/s5_spo_laptop, runs/s6_spo_kaggle, runs/s7c_spo_laptop]
+  anchor_prob: 0.5

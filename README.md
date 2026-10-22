@@ -24,6 +24,7 @@ Agent de reinforcement learning pour Rocket League capable de jouer en **1v1, 2v
 | Algorithme | **PPO + SPO** dans le même code, choisis par un flag (`--policy-loss ppo|spo`) |
 | Multi-agent | **MAPPO** : acteur partagé à attention + critique centralisé |
 | Suivi | **Weights & Biases** + **RLViser** pour voir les parties |
+| Calcul de l'update | CPU, **iGPU Intel** (`xpu`) ou GPU NVIDIA (`cuda`) : `ppo.device` |
 | Démo / évaluation | **RLBot v5** + wrapper **`rlgym-rlbot`** (vrai jeu) |
 
 ## ❌ Décisions écartées
@@ -49,13 +50,17 @@ Agent de reinforcement learning pour Rocket League capable de jouer en **1v1, 2v
 
 | Machine | Config | Collecte seule | De bout en bout |
 |---|---|---|---|
-| Portable (Core Ultra 5 125H, 14 cœurs, sans GPU) | 4 workers × 8 arènes, synchrone, 8 threads (`configs/laptop.yaml`) | ~6 700 steps/s | **~1 400 steps/s** (≈ 5 M steps/heure) |
-| Gros PC | à mesurer : `python scripts/benchmark_sps.py --workers 4 8 12 --envs 4 8` | — | — |
+| Portable (Core Ultra 5 125H, 14 cœurs), update sur **CPU** | 4 workers × 8 arènes, synchrone, 8 threads (`laptop`) | ~6 700 steps/s | ~1 300 steps/s (≈ 5 M steps/heure) |
+| Portable, update sur l'**iGPU Intel Arc** (torch « xpu ») | 10 workers × 12 arènes, asynchrone, 2 threads (`laptop` + `laptop_xpu`) | ~10 000 steps/s | **~5 000 steps/s** (≈ 15-18 M steps/heure) |
+| Gros PC | à mesurer : `benchmark_sps.py --workers 8 12 16 --envs 8 12 --threads 2` et `benchmark_update.py --device cuda` | — | — |
 
-Sur CPU, le goulot est l'**update PPO/SPO** (~25 s pour 50k steps), pas la simulation : un GPU (gros PC ou Kaggle) est
-le principal levier restant. Optimisations déjà faites, sans effet sur l'apprentissage (vérifiées par des tests
-d'équivalence) : plusieurs arènes par worker, Transformer limité aux jetons réels (×1,65 sur l'update),
-observations optimisées en 2v2/3v3.
+Sur CPU, le goulot était l'**update PPO/SPO** (16-25 s pour 50k steps). Sur l'iGPU du portable elle prend 3 s et tient
+pendant la collecte du lot suivant (mêmes résultats qu'au CPU à 1e-6 près) : la collecte redevient le goulot.
+Optimisations sans effet sur l'apprentissage (tests d'équivalence) : plusieurs arènes par worker, Transformer limité
+aux jetons réels (×1,65 sur l'update), observations optimisées en 2v2/3v3, update sur iGPU, collecte asynchrone.
+Le 18/10/2026 : observations et rewards réécrits en arithmétique Python directe (numpy est lent sur des vecteurs de 3
+valeurs) : **~×1,9 par cœur** sur le calcul de l'environnement, à résultats identiques (tests contre des copies figées
+dans `tests/reference/`). RocketSim lui-même ne pèse que ~10 % du temps de collecte.
 
 ## 🎯 Objectif « battre un Grand Champion 1 »
 
@@ -81,7 +86,7 @@ Le bot ne joue **jamais en ligne / en ranked**. Il tourne uniquement hors ligne 
 | Phase | Contenu |
 |---|---|
 | **Sprint 1** | Installation, pipeline de bout en bout, PPO/SPO, premier bot qui marque, export vers RLBot |
-| **Sprint 2** | Observations enrichies (prédiction de balle), états de départ variés, kickoffs, self-play avec pool et Elo |
+| **Sprint 2** | Kickoffs, self-play priorisé + ancres d'Elo fixes, lot qui grossit avec le niveau, γ 0,995 ; états de départ variés et pool + Elo déjà faits. Prédiction de balle : seulement en ablation (coûteuse, Nexto s'en passe) |
 | **Sprint 3** | Longs runs sur le gros PC, ablation PPO vs SPO, montée en 2v2/3v3 (esprit d'équipe) |
 | **Sprint 4** | Affinage contre les bots de référence (Necto/Nexto), préparation du match et de la démo |
 

@@ -1,0 +1,25 @@
+# Kaggle, session GPU (« GPU T4 x2 » : 4 vCPU, 2 × T4 16 Go, 30 h GPU/semaine, sessions de 12 h max).
+# Infra seulement (rien de ce que l'agent apprend ne change). Utilisé par cloud/run_cloud.sh :
+#   --profile kaggle --profile s7 --profile s7b [--profile <run>/autotune.yaml]
+# Réglages par défaut = les plus rapides mesurés sans GPU dans la collecte (portable, 4 cœurs, 20/10/2026) :
+#   collecte d'origine 1 325 steps/s → double tampon 2 901 → collecte locale 4 workers 3 731 (×2,8).
+# Au début de chaque session, scripts/autotune.py mesure aussi l'inférence de collecte sur le 2e T4 (mode central)
+# et écrit autotune.yaml, ajouté en dernier : c'est lui qui décide sur la machine réellement obtenue.
+ppo:
+  device: cuda                 # apprentissage sur le 1er T4 (caché derrière la collecte : ~5 s par lot de 50k)
+  batch_steps: 50_000
+  minibatch_size: 25_000
+  device_chunk: 8_192          # pic mémoire GPU ÷3 (25 000 a saturé une T4 après ~45 min : fragmentation)
+  batch_on_device: auto        # lot copié une fois sur le GPU
+train:
+  collect_mode: local          # chaque worker joue avec sa copie de l'acteur : pas d'attente entre processus
+  n_workers: all               # 4 : le processus principal ne fait presque que l'apprentissage (GPU)
+  envs_per_worker: 16
+  collect_pipeline: 2          # (mode central) double tampon : les workers simulent pendant l'inférence
+  collect_device: auto         # (mode central) inférence sur le 2e T4 s'il existe
+  torch_threads: 1
+  async_collect: true          # update sur GPU pendant la collecte (objectif découplé automatique)
+  checkpoint_every_steps: 1_000_000   # sessions coupées sans prévenir : sauvegardes fréquentes
+  prevent_sleep: false
+logging:
+  wandb: off

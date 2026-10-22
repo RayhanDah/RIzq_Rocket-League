@@ -1,0 +1,21 @@
+# Kaggle, session TPU (v5e-8 : 8 puces TPU + beaucoup de vCPU ; ~20 h/semaine, sessions ~9 h — à vérifier).
+# Infra seulement. Le TPU fait l'APPRENTISSAGE (PyTorch/XLA, formes fixes, cf. src/rlagent/accel.py) ; les nombreux
+# CPU font la COLLECTE en mode local (chaque worker joue avec sa copie de l'acteur : passe à l'échelle sans goulot
+# central). RocketSim ne tourne que sur CPU : aucun accélérateur ne peut simuler à sa place.
+# cloud/run_cloud.sh installe torch_xla ; s'il ne marche pas, repli automatique : apprentissage sur CPU avec un tiers
+# des cœurs. scripts/autotune.py mesure (TPU vs CPU, nombre de workers) et écrit autotune.yaml, ajouté en dernier.
+ppo:
+  device: xla
+  batch_steps: 50_000
+  minibatch_size: 25_000
+  device_chunk: 12_500         # divise les minibatchs de 25k et 50k : une seule forme compilée par XLA
+train:
+  collect_mode: local
+  n_workers: all               # remplacé par autotune / run_cloud.sh selon nproc
+  envs_per_worker: 4           # lots d'inférence par worker ; total d'arènes limité (≥ 32 steps/agent/lot)
+  torch_threads: 2
+  async_collect: true
+  checkpoint_every_steps: 1_000_000
+  prevent_sleep: false
+logging:
+  wandb: off

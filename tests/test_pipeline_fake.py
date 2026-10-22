@@ -106,11 +106,33 @@ def test_short_training_run_end_to_end(tmp_path):
     ck = find_latest_checkpoint(run_dir)
     assert ck is not None and len(list((run_dir / "pool").glob("actor_*.pt"))) >= 2
     assert any("vs_hist/episodes" in l for l in lines)
-    # reprise
+    # reprise ; en lr fixe, la config fait foi (un --set ppo.lr_actor=… à la reprise est appliqué)
     cfg["train"]["total_steps"] = 9000
+    cfg["ppo"]["lr_actor"] = 1.0e-4
     train(cfg, run_dir, ck)
     lines = [json.loads(x) for x in (run_dir / "metrics.jsonl").read_text().splitlines()]
     assert lines[-1]["global_step"] >= 9000
+    assert lines[-1]["learn/lr_actor"] == 1.0e-4
+
+
+def test_adaptive_kl_training_run_and_resume_keeps_lr(tmp_path):
+    """lr piloté par le KL : il bouge, reste dans ses bornes, et la reprise repart du lr adapté."""
+    import json
+    from rlagent.train import find_latest_checkpoint, train
+    cfg = _fake_cfg(train={"n_workers": 2, "total_steps": 8000, "checkpoint_every_steps": 4000},
+                    ppo={"lr_schedule": "adaptive_kl", "target_kl": 0.5, "lr_min": 1e-5, "lr_max": 1e-3})
+    cfg["run_name"] = "pytest_fake_adaptive"
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    train(cfg, run_dir)
+    lines = [json.loads(x) for x in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    lrs = [l["learn/lr_actor"] for l in lines]
+    assert all(np.isfinite(l["learn/kl_final"]) for l in lines)
+    assert lrs[0] > float(cfg["ppo"]["lr_actor"]) and all(1e-5 <= x <= 1e-3 for x in lrs)  # KL ≪ cible → lr ↑
+    cfg["train"]["total_steps"] = 12000
+    train(cfg, run_dir, find_latest_checkpoint(run_dir))
+    lines2 = [json.loads(x) for x in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    assert lines2[len(lines)]["learn/lr_actor"] >= lrs[-1]
 
 
 def test_async_collect_training_run(tmp_path):
@@ -144,3 +166,38 @@ def test_async_collect_training_run(tmp_path):
     lines2 = [json.loads(x) for x in (run_dir / "metrics.jsonl").read_text().splitlines()]
     assert len(lines2) > len(lines)
     assert find_latest_checkpoint(run_dir) != ck
+
+
+def test_training_with_drills_prediction_and_warm_start(tmp_path):
+    """Chaîne complète avec exercices + dosage automatique + prédiction de balle, démarrée à chaud depuis un run
+    SANS prédiction (couche d'entrée élargie), avec des adversaires du pool sans prédiction."""
+    import json
+    import shutil
+    from rlagent.train import find_latest_checkpoint, train
+    base = _fake_cfg(train={"n_workers": 2, "total_steps": 4000, "checkpoint_every_steps": 2000},
+                     selfplay={"pool_every_steps": 2000, "hist_prob": 0.5})
+    base["run_name"] = "pytest_base"
+    run_a = tmp_path / "a"
+    run_a.mkdir()
+    train(base, run_a)
+
+    from rlagent.config import _normalize
+    cfg = _fake_cfg(train={"n_workers": 2, "total_steps": 9000, "checkpoint_every_steps": 3000},
+                    selfplay={"pool_every_steps": 3000, "hist_prob": 0.5})
+    cfg["env"]["ball_prediction"] = True
+    cfg["env"]["adaptive_drills"] = True
+    cfg["env"]["start_weights"] = {"kickoff": 0.2, "random": 0.2, **{f"drill_{k}": 0.1 for k in
+                                   ("defense", "shot", "aerial", "wall", "low_boost", "recovery")}}
+    _normalize(cfg)
+    cfg["run_name"] = "pytest_s6"
+    run_b = tmp_path / "b"
+    (run_b / "pool").mkdir(parents=True)
+    for f in (run_a / "pool").glob("actor_*.pt"):
+        shutil.copy(f, run_b / "pool" / f.name)
+    train(cfg, run_b, find_latest_checkpoint(run_a))
+    lines = [json.loads(x) for x in (run_b / "metrics.jsonl").read_text().splitlines()]
+    assert lines[-1]["global_step"] >= 9000
+    assert all(np.isfinite(l["learn/policy_loss"]) for l in lines)
+    keys = set().union(*lines)
+    assert any(k.startswith("drill/") for k in keys) and "mech/avg_boost" in keys
+    assert any("vs_hist/episodes" in l for l in lines)

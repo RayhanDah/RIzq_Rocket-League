@@ -1,0 +1,25 @@
+# Run « s7f » : s7e avec un gradient enfin exploitable (décision PO du 22/10/2026). À EMPILER APRÈS s7, s7b, s7c, s7d et
+# s7e (infrastructure de s7e inchangée : ancres + PFSP, pads de boost dans l'observation, défense aérienne en rendez-vous,
+# rewards s7e). NOUVEAU run, démarrage à chaud depuis s7e_spo_laptop (104,98 M steps : couche d'entrée déjà élargie,
+# critique déjà adapté à γ 0,995, son pool et ses ancres).
+#   Portable : .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile s7 --profile s7b --profile s7c --profile s7d --profile s7e --profile s7f --run-name s7f_spo_laptop
+#   Kaggle   : PROFILES = "s7 s7b s7c s7d s7e s7f", RUN_NAME = "s7f_spo_kaggle", dataset rl-agent-init fait par
+#              python scripts/make_cloud_bundle.py --init runs/s7e_spo_laptop --anchors-from s7 s7b s7c s7d s7e s7f
+#
+# Mesure du bruit du gradient au checkpoint 104,98 M (runs/s7e_spo_laptop/RAPPORT.md, McCandlish et al. 2018) :
+#   taille de lot critique ≈ 1,1-1,3 M steps par pas d'optimiseur ; à 50 000 (minibatch de s7e), 4 % de signal par pas ;
+#   le bonus d'entropie vaut 70 % du signal de la politique et le contre (cosinus −0,27).
+#  F1) Lot de 1 M de steps, minibatchs de 500 000 (~30 % de signal par pas au lieu de 4 %) ; 4 epochs → 8 pas d'Adam
+#      par itération, comme avant. La taille critique grandit avec le niveau : remesurer tous les ~100 M steps et
+#      ajouter un palier à batch_schedule.
+#  F2) Bonus d'entropie 0,01 → 0,005.
+# Le reste (lr piloté par le KL, plafond 3e-3, garde-fou kl_stop, γ 0,995) est celui de s7e : avec un gradient moins
+# bruité, le KL doit enfin répondre au lr.
+# À juger après 30 M steps (~30 itérations) puis 60 M : critères dans REWARDS_S7.md §9.
+train:
+  init_from: runs/s7e_spo_laptop
+
+ppo:
+  ent_coef: 0.005                   # F2
+  batch_schedule:                   # F1 : [step, batch_steps, minibatch_size] (le run démarre à 105 M)
+    - [0, 1_000_000, 500_000]

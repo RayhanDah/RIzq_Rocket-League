@@ -1,0 +1,23 @@
+# Run « s5 » : s4 (laptop_s2 + laptop_s3) + rewards ciblés sur 3 défauts vus dans RLViser (18/10/2026), démarrage à chaud
+# depuis s4 (35,6 M steps : poids, optimiseur, compteur de steps → les décroissances continuent).
+#   .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile laptop_s2 --profile laptop_s3 --profile laptop_s5 --run-name s5_spo_laptop
+train:
+  init_from: runs/s4_spo_laptop
+rewards:
+  # 1) Il pousse la balle vers le camp adverse au lieu de viser le but : touch_strength payait la force de frappe
+  #    dans n'importe quelle direction. Remplacé par « shot » (gain de vitesse de la balle dans l'axe du but adverse,
+  #    négatif vers notre but), balle → but doublé, et un petit bonus de placement derrière la balle face au but.
+  # 2) Il passe sous les balles hautes : bonus aérien des touches ×4 au plafond (au lieu de ×2), petit reward « en l'air »,
+  #    et 2× plus de départs balle en l'air.
+  # 3) Il ignore le boost : ramassage ×3 et petite valeur à garder une réserve.
+  touch_aerial_bonus: 3.0
+  weights:
+    touch_strength: 0.0
+    shot: 1.0
+    vel_ball_to_goal: 0.3
+    align_ball_goal: 0.01
+    in_air: 0.002
+    boost_gain: 0.3
+    boost_keep: 0.003
+env:
+  start_weights: {kickoff: 0.35, random: 0.25, attack_defense: 0.2, aerial: 0.2}

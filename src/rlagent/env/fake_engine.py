@@ -130,13 +130,13 @@ class FakeEngine(TransitionEngine[str, GameState, np.ndarray]):
 def build_fake_env(cfg: Dict[str, Any], seed=None) -> RLGym:
     from .actions import make_action_parser
     from .mutators import RandomFormatMutator, StartStateMutator
-    from .obs import AttentionObs
+    from .obs import AttentionObs, env_obs_flags
     from .rewards import make_reward
     e = cfg["env"]
     return RLGym(
         state_mutator=MutatorSequence(RandomFormatMutator(e["format_weights"], seed=seed),
                                       StartStateMutator(e["start_weights"], seed=seed)),
-        obs_builder=AttentionObs(),
+        obs_builder=AttentionObs(*env_obs_flags(cfg["env"])),
         action_parser=make_action_parser(e["action_repeat"]),
         reward_fn=make_reward(cfg),
         termination_cond=GoalCondition(),

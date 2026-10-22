@@ -37,6 +37,21 @@ pip install -r requirements.txt
 pip install -e ".[dev]"
 ```
 
+### 2 bis. iGPU Intel (portable Core Ultra / Arc) : update ×5 plus rapide
+
+Sans GPU NVIDIA, l'iGPU Intel Arc fait tourner l'update PPO/SPO (le goulot sur CPU) via PyTorch « xpu ».
+Venv séparé, pour ne pas toucher au venv CPU (pilote graphique Intel récent requis, rien d'autre) :
+```bash
+py -3.12 -m venv .venv-xpu
+.venv-xpu\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/xpu
+.venv-xpu\Scripts\python -m pip install -r requirements.txt
+.venv-xpu\Scripts\python -m pip install -e .
+.venv-xpu\Scripts\python -c "import torch; print(torch.xpu.is_available())"     # → True
+.venv-xpu\Scripts\python scripts/benchmark_update.py --profile laptop --device xpu  # comparer à --device cpu
+```
+Puis ajouter le profil `laptop_xpu` (update sur l'iGPU, collecte asynchrone, 10 × 12 arènes). Mesuré le 16/10/2026
+(torch 2.14.1+xpu) : update 16,4 s → 3,2 s, de bout en bout ~1 300 → ~5 000 steps/s, résultats identiques au CPU (1e-6).
+
 ---
 
 ## 3. Tests (aucun besoin du jeu)
@@ -82,7 +97,8 @@ RocketSim en 1v1/2v2/3v3 et joue quelques centaines de steps.
 
 ```bash
 python -m rlagent.train --profile debug                       # fumée : 2-5 min
-python scripts/benchmark_sps.py --workers 2 4 6 --envs 1 4 8  # régler train.n_workers / train.envs_per_worker
+python scripts/benchmark_sps.py --workers 4 8 10 --envs 8 12 --threads 2   # régler n_workers / envs_per_worker
+python scripts/benchmark_update.py --profile laptop --device cpu             # durée de l'update (cpu / cuda / xpu)
 python -m rlagent.train --profile laptop --run-name s1_spo_laptop
 python -m rlagent.train --profile laptop --set ppo.policy_loss=ppo --run-name s1_ppo_laptop   # ablation
 ```
@@ -99,9 +115,15 @@ pip install "rlgym[rl-rlviser]==2.0.1"
 python scripts/watch.py --policy runs/<run> --format 1                       # voir le bot (RLViser)
 python scripts/evaluate.py --a runs/<runA> --b runs/<runB> --format 1 --games 50   # matchs simulés
 python scripts/evaluate.py --a runs/<run> --scenario empty_goal --trials 200      # critère S1-20 (but vide)
+python scripts/compare_runs.py s2_spo_laptop s4_spo_laptop --at 1 5 10            # runs comparés au même step
 ```
 
 ---
+
+## 7 bis. Entraîner sur Kaggle / Google Colab
+
+Voir [`cloud/README.md`](cloud/README.md) : `python scripts/make_cloud_bundle.py --init runs/<run>`, puis les notebooks
+`cloud/kaggle_train.ipynb` / `cloud/colab_train.ipynb`.
 
 ## 8. RLBot v5 (vrai jeu) — **gros PC Windows uniquement**
 
@@ -128,7 +150,7 @@ python scripts/evaluate.py --a runs/<run> --scenario empty_goal --trials 200    
 rl-agent/
 ├── README.md  INSTALL.md  ARCHITECTURE.md  SPRINT_1.md
 ├── pyproject.toml  requirements.txt
-├── configs/            default.yaml + profils laptop / bigpc / debug
+├── configs/            default.yaml + profils machine (laptop, laptop_xpu, bigpc, debug) et de run (laptop_s2, laptop_s3)
 ├── src/rlagent/
 │   ├── env/            obs, actions, mutators (formats + états de départ), rewards, factory, moteur factice
 │   ├── models/         acteur à attention + critique
@@ -137,7 +159,7 @@ rl-agent/
 │   ├── metrics/        stats d'épisode (jeu d'équipe, kickoffs)
 │   ├── utils/          journalisation
 │   └── train.py        boucle principale
-├── scripts/            check_install, benchmark_sps, evaluate, watch, export_bot
+├── scripts/            check_install, benchmark_sps, benchmark_update, compare_runs, evaluate, watch, export_bot
 ├── bot/                bot RLBot v5
 ├── tests/
 ├── collision_meshes/   (non versionné) soccar/mesh_*.cmf

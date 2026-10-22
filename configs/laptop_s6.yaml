@@ -1,0 +1,31 @@
+# Run « s6 » : s5 + exercices dédiés (avec dosage automatique) + rewards associés + prédiction de trajectoire de balle.
+# Démarrage à chaud depuis s5 (65,9 M steps) : couche d'entrée élargie, nouvelles entrées à poids nuls → au départ,
+# s6 joue exactement comme s5, puis apprend à utiliser la trajectoire.
+#   Portable (iGPU) : .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile laptop_s2 --profile laptop_s3 --profile laptop_s5 --profile laptop_s6 --run-name s6_spo_laptop
+#   Kaggle / Colab  : voir cloud/README.md (profil kaggle ou colab à la place de laptop + laptop_xpu)
+train:
+  init_from: runs/s5_spo_laptop
+env:
+  # Trajectoire analytique de la balle (où/quand elle retombe, hauteur max, positions à 0,5/1/1,5 s) : 14 entrées
+  # de plus, calcul quasi gratuit. Doit aider à anticiper les balles hautes au lieu de passer dessous.
+  ball_prediction: true
+  # 50 % de matchs normaux, 50 % d'exercices. Le dosage automatique fait revenir plus souvent les exercices ratés
+  # (moyenne glissante de réussite par exercice), sans toucher à la part des matchs normaux.
+  adaptive_drills: true
+  start_weights:
+    attack_defense: 0.0      # remplacés par les exercices ci-dessous (les profils fusionnent les dictionnaires)
+    aerial: 0.0
+    kickoff: 0.30
+    random: 0.20
+    drill_defense: 0.10      # tir adverse vers notre but → réussite : pas de but encaissé en 6 s
+    drill_shot: 0.10         # balle devant la surface adverse → réussite : but en 6 s
+    drill_aerial: 0.10       # balle qui retombe de haut, 60-100 de boost → réussite : touche au-dessus de 400 uu en 4 s
+    drill_wall: 0.06         # balle le long d'un mur → réussite : touche au mur en 5 s
+    drill_low_boost: 0.07    # 0-15 de boost, balle loin → réussite : ≥ 50 de boost en 6 s
+    drill_recovery: 0.07     # voiture en l'air mal orientée → réussite : sur ses roues en 2 s
+rewards:
+  # Rewards associés (en plus de ceux de s5 : shot, align_ball_goal, in_air, boost_gain, boost_keep) :
+  weights:
+    save: 1.0                # arrêt : casser un tir qui allait vers notre but
+    boost_waste: 0.003       # -1/step quand on booste au sol déjà supersonique (boost jeté)
+    goalside: 0.005          # balle dans notre moitié : être entre la balle et notre but

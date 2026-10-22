@@ -1,0 +1,18 @@
+# Run « s7d » : reprise de s7c avec les correctifs aérien + boost (décision PO du 21/10/2026). À EMPILER APRÈS s7, s7b
+# et s7c. Même run (reprise automatique, config.yaml réécrit) :
+#   .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile s7 --profile s7b --profile s7c --profile s7d --run-name s7c_spo_laptop
+# Diagnostic : runs/s7c_spo_laptop/DIAGNOSTIC_AERIEN_BOOST.md (s7c à 34,6 M steps).
+#  A1) Exercice aérien en RENDEZ-VOUS (code, env/mutators.py) : la balle passe à 200-280 uu au-dessus du point où la
+#      voiture arrive ~1 s plus tard. L'ancien niveau 0 était quasi irréalisable (s7c : 3,5 %) ; une politique scriptée
+#      simple réussit le nouveau à 86 %.
+#  A2) Touche aérienne payée dès 200 uu, comme le seuil de réussite de l'exercice (220 avant).
+#  B1) Potentiel de boost sans fuite (γ = 1) : avec γ = 0,99, garder 100 de boost coûtait 0,006/step, le bot vidait
+#      son réservoir (à 0 de boost 81 % du temps).
+#  B2) Aide d'approche plafonnée à la vitesse max sans boost (1410 uu/s) : elle payait ~+0,02/step pour booster vers
+#      la balle.
+# À juger après 5-10 M steps : curriculum/aerial/level qui quitte 0, mech/avg_boost > 25, mech/low_boost_frac < 0,5,
+# touches/min qui ne baissent pas (s7c ~21 à 24 M).
+rewards:
+  aerial_min_z: 200.0               # A2
+  boost_potential_gamma: 1.0        # B1
+  vel_player_to_ball_cap: 1410.0    # B2

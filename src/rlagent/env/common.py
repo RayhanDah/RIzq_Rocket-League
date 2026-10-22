@@ -1,6 +1,7 @@
 """Utilitaires partagés : perspective d'équipe, distances, rangs de proximité."""
 from __future__ import annotations
 
+import math
 from typing import Dict, List
 
 import numpy as np
@@ -20,8 +21,14 @@ def ball_phys(state: GameState, inverted: bool) -> PhysicsObject:
     return state.inverted_ball if inverted else state.ball
 
 
+def norm3(v) -> float:
+    """Norme d'un vecteur 3D. ~10× plus rapide que np.linalg.norm sur de si petits vecteurs (même valeur)."""
+    x, y, z = v[0], v[1], v[2]
+    return math.sqrt(float(x * x + y * y + z * z))
+
+
 def unit(v: np.ndarray) -> np.ndarray:
-    n = float(np.linalg.norm(v))
+    n = norm3(v)
     return v / n if n > 1e-6 else np.zeros_like(v)
 
 
@@ -31,7 +38,7 @@ def team_proximity_ranks(state: GameState) -> Dict[str, int]:
     ball = state.ball.position
     by_team: Dict[int, List] = {}
     for agent, car in state.cars.items():
-        by_team.setdefault(car.team_num, []).append((float(np.linalg.norm(car.physics.position - ball)), agent))
+        by_team.setdefault(car.team_num, []).append((norm3(car.physics.position - ball), agent))
     for members in by_team.values():
         members.sort(key=lambda t: (t[0], str(t[1])))
         for rank, (_, agent) in enumerate(members):
@@ -41,4 +48,4 @@ def team_proximity_ranks(state: GameState) -> Dict[str, int]:
 
 def is_kickoff_state(state: GameState) -> bool:
     b = state.ball
-    return bool(abs(b.position[0]) < 1 and abs(b.position[1]) < 1 and np.linalg.norm(b.linear_velocity) < 1)
+    return bool(abs(b.position[0]) < 1 and abs(b.position[1]) < 1 and norm3(b.linear_velocity) < 1)

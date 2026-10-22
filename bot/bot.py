@@ -19,7 +19,7 @@ sys.path.insert(0, str(HERE.parent / "src"))
 from rlgym_rlbot import RLGymBot, RLGymBotConfig  # noqa: E402
 
 from rlagent.env.actions import make_action_parser  # noqa: E402
-from rlagent.env.obs import AttentionObs  # noqa: E402
+from rlagent.env.obs import BALL_PRED_DIM, RACE_DIM, SELF_DIM, AttentionObs  # noqa: E402
 from rlagent.train import build_actor_from_model_cfg  # noqa: E402
 
 
@@ -31,6 +31,12 @@ class Agent:
         self.actor.eval()
         self.deterministic = deterministic
         self.action_repeat = int(data.get("action_repeat", 8))
+        # observations identiques à l'entraînement : avec prédiction de balle / course à la balle si le réseau a été
+        # entraîné avec (les options s'ajoutent à la fin du bloc « soi », cf. models/attention.py:SELF_DIMS)
+        sd = int(data["model_cfg"].get("self_dim", SELF_DIM))
+        self.ball_prediction = sd > SELF_DIM
+        self.race_features = sd > SELF_DIM + BALL_PRED_DIM
+        self.boost_features = sd > SELF_DIM + BALL_PRED_DIM + RACE_DIM
         torch.set_num_threads(1)
 
     @torch.no_grad()
@@ -44,7 +50,9 @@ class RLAgentBot(RLGymBot):
     def __init__(self):
         self.agent = Agent(HERE / "model.pt")
         super().__init__(
-            obs_builder=AttentionObs(),
+            obs_builder=AttentionObs(ball_prediction=self.agent.ball_prediction,
+                                     race_features=self.agent.race_features,
+                                     boost_features=self.agent.boost_features),
             action_parser=make_action_parser(self.agent.action_repeat),
             default_agent_id="ensisa/rlagent/v0.1",
             # Valeurs par défaut du wrapper = RocketSimEngine(rlbot_delay=True), comme à l'entraînement.

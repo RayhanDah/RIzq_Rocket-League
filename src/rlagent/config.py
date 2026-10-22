@@ -59,8 +59,15 @@ def _normalize(cfg: Dict[str, Any]) -> None:
     env = cfg["env"]
     env["format_weights"] = {int(k): float(v) for k, v in env["format_weights"].items()}
     env["start_weights"] = {str(k): float(v) for k, v in env["start_weights"].items()}
+    from .env.obs import self_dim  # import tardif : config.py reste léger
+    env["ball_prediction"] = bool(env.get("ball_prediction", False))
+    env["race_features"] = bool(env.get("race_features", False))
+    env["boost_features"] = bool(env.get("boost_features", False))
+    cfg.setdefault("model", {})["self_dim"] = self_dim(env["ball_prediction"], env["race_features"], env["boost_features"])
     train = cfg["train"]
     if train.get("n_workers") in (None, "auto"):
         train["n_workers"] = max(1, (os.cpu_count() or 2) - 1)
+    elif train.get("n_workers") == "all":       # collecte locale : le processus principal attend presque tout le temps
+        train["n_workers"] = max(1, os.cpu_count() or 1)
     if train.get("torch_threads") in (None, "auto"):
         train["torch_threads"] = max(1, min(4, (os.cpu_count() or 2) // 2))

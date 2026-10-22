@@ -13,3 +13,8 @@ settings.txt
 
 # Notes et fichiers locaux (non publiés)
 bot/model.pt
+REVUE_STRATEGIE.md
+dist/
+mlflow.db
+mlruns/
+mlartifacts/

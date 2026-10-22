@@ -1,0 +1,101 @@
+# Run « s7 » : refonte des rewards (potentiels + événements de compétence), « course à la balle » dans les observations,
+# curriculum aérien progressif, horizon plus long, lot qui grossit avec le niveau. DÉPART DE ZÉRO (pas d'init_from) :
+# s6 ne saute plus (0,05 saut/min à 163 M steps, P(saut) ≈ 5e-5/step) et aucun gradient ne peut le lui réapprendre.
+# Détails et justification : REWARDS_S7.md.
+#   Portable (iGPU) : .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile s7 --run-name s7_spo_laptop
+#   Kaggle / Colab  : --profile kaggle --profile s7 --run-name s7_spo_kaggle   (cf. cloud/README.md)
+# Indépendant des profils laptop_s2 … laptop_s6 (ne pas les empiler : ils contiennent des init_from).
+train:
+  init_from: null
+
+env:
+  format_weights: {1: 0.84, 2: 0.12, 3: 0.04}      # 70 / 20 / 10 % des DONNÉES (cf. laptop_s3)
+  ball_prediction: true
+  race_features: true            # ETA de chaque voiture, avance sur l'adversaire, interception, tirs cadrés (env/predict.py)
+  adaptive_drills: true          # les exercices ratés reviennent plus souvent (part totale des exercices inchangée)
+  drill_curriculum:              # niveau de difficulté global des exercices aerial / aerial_defense / defense / shot
+    enabled: true
+    start: 0.0                   # aérien niveau 0 = toucher une balle à ~300 uu en sautant
+    step: 0.01                   # par itération : ≥ 100 itérations pour aller de 0 à 1
+    promote: 0.65                # réussite > 65 % → plus dur
+    demote: 0.35                 # réussite < 35 % → plus facile
+    ema: 0.05
+  start_weights:
+    kickoff: 0.30
+    random: 0.15
+    drill_aerial: 0.14           # du saut simple à l'aérienne au plafond (curriculum)
+    drill_aerial_defense: 0.08   # lob qui retombe dans notre but
+    drill_defense: 0.10          # tir vers notre but
+    drill_shot: 0.08
+    drill_wall: 0.05
+    drill_low_boost: 0.05
+    drill_recovery: 0.05
+
+rewards:
+  zero_sum_terms: [goal]         # threat, ball_goal, kickoff_win sont antisymétriques par construction
+  touch_aerial_bonus: 0.0        # la hauteur est payée par aerial_touch (touche en l'air seulement)
+  weights:
+    # --- match
+    goal: 10.0
+    concede: 3.0                 # encaisser coûte 13, marquer rapporte 10 : priorité défense
+    # --- potentiels γΦ(s') − Φ(s) (impossibles à farmer, cf. env/rewards.py)
+    threat: 3.0                  # tir cadré / arrêt / urgence quand la balle file vers notre but
+    ball_goal: 2.0               # balle vers le but adverse (remplace vel_ball_to_goal)
+    positioning: 1.0             # course gagnée → aller à la balle ; perdue → se replacer (remplace vel_player_to_ball,
+                                 # align_ball_goal, goalside)
+    boost_potential: 0.6         # √boost (remplace boost_keep)
+    # --- compétences (événements)
+    aerial_touch: 1.5            # touche en l'air : 0,75 au ras du sol → 3 au plafond, ×2 en air dribble (1 touche / 0,5 s)
+    kickoff_win: 1.5             # balle dans le camp adverse 3 s après l'engagement
+    touch: 0.5
+    # --- aides d'apprentissage (décroissent)
+    air_approach: 0.03           # en l'air vers une balle haute (1er homme)
+    kickoff_rush: 0.03           # vitesse vers la balle au kickoff (1er homme)
+    in_air: 0.002                # ne pas « oublier » de sauter au début (ratio du guide rlgym-ppo)
+    face_ball: 0.01
+    boost_gain: 0.15             # ramassage
+    # --- hygiène
+    boost_waste: 0.003
+    double_commit: 0.05
+    # --- remplacés (désactivés)
+    vel_player_to_ball: 0.0
+    vel_ball_to_goal: 0.0
+    shot: 0.0
+    save: 0.0
+    align_ball_goal: 0.0
+    goalside: 0.0
+    boost_keep: 0.0
+    touch_strength: 0.0
+  anneal:
+    touch: {end: 0.2, steps: 80_000_000}
+    face_ball: {end: 0.0, steps: 20_000_000}
+    in_air: {end: 0.0, steps: 30_000_000}
+    boost_gain: {end: 0.0, steps: 60_000_000}
+    air_approach: {end: 0.3, steps: 150_000_000}
+    kickoff_rush: {end: 0.3, steps: 100_000_000}
+  team_spirit: {start: 0.0, end: 0.3, steps: 60_000_000}
+
+ppo:
+  gamma: 0.995                   # horizon ~9 s (0,99 : ~4,6 s) : défense, gestion du boost, constructions
+  gae_lambda: 0.95
+  lr_schedule: adaptive_kl       # cf. laptop_s3
+  target_kl: 0.01
+  kl_stop: 4.0
+  lr_min: 5.0e-5
+  lr_max: 1.0e-3
+  epochs: 4
+  # Lot qui grossit avec le niveau (s6 : lr au plafond et KL 6× sous la cible = gradient trop bruité sur 50k steps).
+  batch_schedule:                # [step, batch_steps, minibatch_size]
+    - [0, 50_000, 25_000]
+    - [25_000_000, 100_000, 50_000]
+    - [80_000_000, 200_000, 50_000]
+
+selfplay:
+  pool_every_steps: 2_500_000
+  # Self-play priorisé + ancres (REWARDS_S7.md §8, selfplay/pool.py) : DÉSACTIVÉ tant que le PO n'a pas validé. Essai :
+  #   --set selfplay.pfsp=true --set "selfplay.anchors=[runs/s4_spo_laptop, runs/s6_spo_kaggle]"
+  pfsp: false                    # tirer plus souvent les versions qui nous battent : poids (1 − p_victoire)²
+  pfsp_uniform: 0.3              # dont 30 % de tirage uniforme (ne pas oublier les versions déjà battues)
+  pfsp_window: 50                # score glissant ≈ 50 derniers épisodes contre chaque version (pool/pfsp_stats.json)
+  anchors: []                    # adversaires fixes, hors fenêtre pool_recent, figés dans pool/anchors/ ; jouent via fit_obs
+  anchor_prob: 0.2               # part des épisodes contre l'historique (hist_prob 0,2) jouée contre une ancre → 4 %

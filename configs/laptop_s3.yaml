@@ -1,0 +1,23 @@
+# Réglages d'apprentissage « v3 » : s2 + apprentissage plus efficace par échantillon + priorité 1v1 (revue du 16/10/2026).
+#   .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile laptop_s2 --profile laptop_s3 --run-name s4_spo_laptop
+# Run s3 (2,76 M steps, arrêté) : sans l'objectif découplé, la collecte asynchrone + SPO + des updates plus grands
+# oscillaient (SPO ramenait la politique vers celle de collecte, en retard d'une itération). Corrigé dans le code
+# (algo/losses.py, actif d'office en collecte asynchrone) → run s4, même profil.
+# (sans iGPU : retirer laptop_xpu et lancer avec .venv ; seul le débit change)
+#
+# 1) Diagnostic : sur s1 et s2, la politique ne bougeait presque pas d'une itération à l'autre (KL ≈ 1e-4 à 1e-3,
+#    clip_frac ≈ 0) ; après 5 M steps elle était encore quasi uniforme (entropie 4,37 pour un maximum de 4,50).
+#    → lr de l'acteur piloté par le KL (cible 0,01, plafond 1e-3 = 5× l'ancien lr) + garde-fou d'arrêt anticipé,
+#    et 4 epochs au lieu de 2 (gratuit : l'update sur l'iGPU tient pendant la collecte).
+ppo:
+  lr_schedule: adaptive_kl
+  target_kl: 0.01
+  kl_stop: 4.0
+  lr_min: 5.0e-5
+  lr_max: 1.0e-3
+  epochs: 4
+# 2) Priorité au 1v1 (le match se joue en 1v1). Avec 70/20/10 en ÉPISODES, le 1v1 ne faisait que 50 % des
+#    données d'apprentissage (un épisode 3v3 produit 3× plus de transitions qu'un 1v1). Ces poids donnent
+#    70 % / 20 % / 10 % des DONNÉES en 1v1 / 2v2 / 3v3.
+env:
+  format_weights: {1: 0.84, 2: 0.12, 3: 0.04}

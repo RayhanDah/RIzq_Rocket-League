@@ -156,3 +156,48 @@ def test_touch_strength_only_on_touch_and_disabled_by_default():
     cfg = load_config()
     assert "touch_strength" not in cfg["rewards"]["weights"]
     assert all(term.name != "touch_strength" for term in make_reward(cfg).terms)
+
+
+def test_shot_rewards_only_goal_directed_hits():
+    from rlagent.env.rewards import ShotTerm
+    s = make_state(1)
+    agents = list(s.cars)
+    t = ShotTerm()
+    s.ball.position = np.array([0, 0, 93.0], dtype=np.float32)
+    s.ball.linear_velocity = np.zeros(3, dtype=np.float32)
+    t.reset(agents, s, {})
+    s.cars["blue-0"].ball_touches = 1
+    s.ball.linear_velocity = np.array([0, 3000.0, 0], dtype=np.float32)       # vers le but orange
+    r = t.get(agents, s, {})
+    assert r["blue-0"] > 0.45 and r["orange-0"] == 0.0
+    s.ball.linear_velocity = np.array([3000.0, 3000.0, 0], dtype=np.float32)  # frappe vers le côté : ~0
+    assert abs(t.get(agents, s, {})["blue-0"]) < 0.05
+    s.cars["blue-0"].ball_touches = 0
+    s.cars["orange-0"].ball_touches = 1
+    s.ball.linear_velocity = np.array([3000.0, -1000.0, 0], dtype=np.float32)  # l'orange renvoie vers le but bleu
+    assert t.get(agents, s, {})["orange-0"] > 0.3
+
+
+def test_align_ball_goal_symmetric_and_signed():
+    from rlagent.env.rewards import AlignBallGoalTerm
+    s = make_state(1)
+    s.ball.position = np.array([0, 0, 93.0], dtype=np.float32)
+    s.cars["blue-0"].physics.position = np.array([0, -2000.0, 17], dtype=np.float32)    # derrière la balle
+    s.cars["orange-0"].physics.position = np.array([0, 2000.0, 17], dtype=np.float32)   # derrière la balle aussi
+    r = AlignBallGoalTerm().get(list(s.cars), s, {})
+    assert r["blue-0"] > 0.95 and np.isclose(r["blue-0"], r["orange-0"], atol=1e-4)
+    s.cars["blue-0"].physics.position = np.array([0, 3000.0, 17], dtype=np.float32)     # entre balle et but adverse
+    assert AlignBallGoalTerm().get(["blue-0"], s, {})["blue-0"] < -0.95
+
+
+def test_in_air_and_boost_keep():
+    from rlagent.env.rewards import BoostKeepTerm, InAirTerm
+    s = make_state(1)
+    s.cars["blue-0"].on_ground = False
+    s.cars["orange-0"].on_ground = True
+    r = InAirTerm().get(list(s.cars), s, {})
+    assert r == {"blue-0": 1.0, "orange-0": 0.0}
+    s.cars["blue-0"].boost_amount = 25.0
+    assert np.isclose(BoostKeepTerm().get(["blue-0"], s, {})["blue-0"], 0.5)
+    cfg = load_config()  # sans poids dans default.yaml : termes inactifs
+    assert not {"shot", "align_ball_goal", "in_air", "boost_keep"} & {t.name for t in make_reward(cfg).terms}

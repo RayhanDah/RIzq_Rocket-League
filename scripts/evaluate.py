@@ -48,7 +48,7 @@ def empty_goal_eval(spec: str, trials: int, seconds: float, deterministic: bool,
     from rlagent.env.factory import build_env
     from rlagent.env.mutators import EmptyGoalMutator
 
-    cfg = load_config()
+    cfg = load_config(overrides=["env.ball_prediction=true", "env.race_features=true", "env.boost_features=true"])  # sur-ensemble : anciens agents compatibles (fit_obs)
     cfg["env"]["episode_timeout_s"] = seconds
     cfg["env"]["no_touch_timeout_s"] = seconds
     env = build_env(cfg, seed=seed, state_mutator=EmptyGoalMutator(seed))
@@ -109,7 +109,7 @@ def main():
     from rlagent.config import load_config
     from rlagent.env.factory import build_env
 
-    cfg = load_config()
+    cfg = load_config(overrides=["env.ball_prediction=true", "env.race_features=true", "env.boost_features=true"])  # sur-ensemble : anciens agents compatibles (fit_obs)
     cfg["env"]["format_weights"] = {args.format: 1.0}
     cfg["env"]["start_weights"] = {"kickoff": 1.0}
     cfg["env"]["episode_timeout_s"] = args.game_seconds

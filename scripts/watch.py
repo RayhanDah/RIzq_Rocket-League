@@ -36,7 +36,7 @@ def main():
 
     # 1 thread suffit en temps réel ; sinon PyTorch prend tous les cœurs et ralentit un entraînement en cours
     torch.set_num_threads(1)
-    cfg = load_config()
+    cfg = load_config(overrides=["env.ball_prediction=true", "env.race_features=true", "env.boost_features=true"])  # sur-ensemble : anciens agents compatibles (fit_obs)
     cfg["env"]["format_weights"] = {args.format: 1.0}
     cfg["env"]["start_weights"] = {args.start: 1.0}
     env = build_env(cfg, seed=7)

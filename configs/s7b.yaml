@@ -1,0 +1,46 @@
+# Run « s7b » : s7 + correctifs du démarrage (décision PO du 20/10/2026), À EMPILER APRÈS s7. Départ de zéro.
+#   .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile s7 --profile s7b --run-name s7b_spo_laptop
+# s7 (arrêté à 13 M steps) apprenait ~6× moins vite que s4 : à 9,5 M steps, 1,5 touche/min contre 9,3.
+#  1) ETA en l'air corrigée dans env/predict.py (code, pas de réglage) : la voiture garde sa vitesse en vol puis
+#     réaccélère au sol. Avant, l'ETA bondissait au plafond à chaque saut → `positioning` très bruité (34 % du signal
+#     venait des décollages / atterrissages) et chaque saut était puni sur le moment.
+#  2) Amorce éprouvée de s4 : vitesse vers la balle, 0,05 → 0 sur 30 M steps (signal dense et peu bruité au début).
+#  3) γ 0,99 pendant l'apprentissage des bases (retours moins bruités). Passer à 0,995 quand il marque régulièrement :
+#     mettre `gamma: 0.995` ici, créer runs/s7b_spo_laptop/STOP, puis relancer la MÊME commande (reprise automatique,
+#     config.yaml réécrit ; les potentiels suivent le γ de la config).
+rewards:
+  race_temperature: 0.6           # 4)
+  boost_gain_below: 50            # 5)
+  weights:
+    vel_player_to_ball: 0.05
+    positioning: 0.4              # 4)
+    boost_gain: 0.4               # 5)
+  anneal:
+    vel_player_to_ball: {end: 0.0, steps: 30_000_000}
+    boost_gain: {begin: 60_000_000, end: 0.0, steps: 60_000_000}   # 5)
+ppo:
+  gamma: 0.99
+
+# --- Correctifs du 20/10/2026 à 26 M steps (décision PO, critique des rewards). Reprise du run, pas de redémarrage.
+# Match contre s6 à 26 M : 0 V / 12 D (buts 6-68) ; à 24 M, 1,7× moins de touches que s4 au même step.
+#  4) `positioning` trop lourd et trop bruité (0,037/step, autant que le but ; il bascule sans arrêt entre attaque et
+#     défense quand les deux voitures arrivent en même temps) : poids 1,0 → 0,4, transition 0,3 → 0,6 s.
+#  5) Boost à sec 71 % du temps : ramassage 0,15 → 0,4, payé seulement sous 50 de boost, sans décroissance avant 60 M.
+#  6) Trop d'exercices pour son niveau (55 %, la plupart ratés) : 35 % jusqu'à ce que les bases soient là. L'aérien
+#     garde la plus grosse part (identité de l'agent).
+#  7) Curriculum aérien bloqué au niveau 0 (1-4 % de réussite) : niveau 0 rendu vraiment facile (env/mutators.py)
+#     et passage au niveau supérieur à 50 % de réussite au lieu de 65 %.
+env:
+  start_weights:
+    kickoff: 0.35
+    random: 0.30
+    drill_aerial: 0.10
+    drill_aerial_defense: 0.04
+    drill_defense: 0.07
+    drill_shot: 0.05
+    drill_wall: 0.03
+    drill_low_boost: 0.03
+    drill_recovery: 0.03
+  drill_curriculum:
+    promote: 0.5
+    demote: 0.25

@@ -1,0 +1,15 @@
+# Portable avec l'update sur l'iGPU Intel Arc (PyTorch « xpu », venv .venv-xpu, cf. INSTALL.md §2 bis).
+# À ajouter APRÈS laptop :  --profile laptop --profile laptop_xpu ...
+# Infra uniquement (aucun effet sur ce que l'agent apprend). Mesures du 16/10/2026 (lot de 50k, 2 epochs) :
+# - update : 16,4 s sur CPU (8 threads) → 3,2 s sur l'iGPU (×5), résultats identiques à 1e-6 près ;
+# - de bout en bout : ~1 300 steps/s (CPU, synchrone) → ~5 000 steps/s (iGPU, asynchrone, 10 × 12 arènes).
+# L'update tient pendant la collecte du lot suivant : la collecte (CPU) redevient le goulot.
+ppo:
+  device: xpu
+  device_chunk: 25_000           # minibatch entier d'un coup sur l'iGPU (plus rapide que 4 096)
+train:
+  async_collect: true            # update (iGPU) pendant la collecte (CPU) ; 1 itération de retard, ratio exact
+  collect_device: cpu
+  torch_threads: 2               # inférence de collecte : 2 threads > 4 ou 8 (moins de contention avec les workers)
+  n_workers: 10
+  envs_per_worker: 12            # collecte seule : ~10 000 steps/s (benchmark_sps.py --threads 2)

@@ -106,3 +106,17 @@ Prédiction de trajectoire de balle dans les observations, états de départ ava
 | S1-20 | ❌ pas encore | Scénario « but vide » (`evaluate.py --scenario empty_goal`) : s1 à 34 M steps marque 6 % (stochastique) / 15 % (déterministe) en 10 s, contre 1 % au hasard → poursuivre l'entraînement (run s2) |
 | S1-21 | ✅ portable | Débits dans le README ; gros PC à mesurer |
 | bonus | ✅ | Pool + Elo, moteur factice, collecte multi-arènes, apprentissage sans jetons masqués, profil `laptop_s2` |
+
+## 📍 Avancement au 16/10/2026 (revue de stratégie)
+
+| Sujet | Résultat |
+|---|---|
+| s2 (5,5 M steps) | But vide **4 %** (s1 : 6 % à 34 M steps ; aléatoire 1 %) : ~6× plus efficace que s1 par step |
+| Diagnostic | La politique bougeait à peine par itération (KL ≈ 1e-4, `clip_frac` ≈ 0) → lr de l'acteur piloté par le KL + 4 epochs |
+| S1-21 débit | Update sur l'**iGPU Intel Arc** (×5) + collecte asynchrone retunée : **~1 300 → ~5 000 steps/s** sur le portable |
+| Formats | Le 1v1 ne faisait que 50 % des données → poids 0,84/0,12/0,04 = 70/20/10 % des données (s3) |
+| Run s3 | 02:47 → 02:58, arrêté à 2,76 M steps : collecte asynchrone + SPO + updates plus grands → oscillation. Corrigé (objectif découplé, Hilton et al. 2021) |
+| Run s4 | Lancé le 16/10 à 02:59, même profil, code corrigé (voir `runs/s4_spo_laptop/RAPPORT.md`) |
+| Tests | 46 verts (CPU et venv iGPU) |
+| Run s5 (18/10) | Démarrage à chaud depuis s4, rewards de tir cadré / aérien / boost : vise mieux le but (vu dans RLViser) ; 35,6 → 65,9 M steps, Elo 1 210 → 1 338 |
+| s6 préparé (18/10) | 6 exercices dédiés + dosage automatique, rewards d'arrêt / boost gaspillé / placement défensif, trajectoire de balle, métriques des mécaniques ; kit Kaggle / Colab (`cloud/`). 63 tests verts |

@@ -53,14 +53,21 @@ ppo:
   minibatch_size: 50_000
   device_chunk: 8_192               # taille des sous-lots en mémoire (accumulation de gradient)
   epochs: 2
-  lr_actor: 2.0e-4
+  lr_actor: 2.0e-4                  # lr de départ de l'acteur (fixe, ou point de départ du mode adaptive_kl)
   lr_critic: 2.0e-4
+  # fixed | adaptive_kl. adaptive_kl : le lr de l'acteur est ajusté à chaque itération pour que la politique bouge
+  # d'environ target_kl (KL > 2×cible → lr/1,5 ; KL < cible/2 → lr×1,5), borné à [lr_min, lr_max].
+  lr_schedule: fixed
+  target_kl: 0.01
+  lr_min: 5.0e-5
+  lr_max: 1.0e-3
+  kl_stop: 4.0                      # adaptive_kl : on arrête l'itération si KL > kl_stop × target_kl (garde-fou)
   gamma: 0.99
   gae_lambda: 0.95
   ent_coef: 0.01
   vf_coef: 1.0
   max_grad_norm: 0.5
-  device: auto                      # auto | cpu | cuda
+  device: auto                      # auto | cpu | cuda | xpu (iGPU Intel : torch « xpu », cf. INSTALL.md)
 
 selfplay:
   hist_prob: 0.2                    # part des épisodes joués contre une ancienne version (ARCHITECTURE §9)
@@ -75,6 +82,8 @@ train:
   keep_checkpoints: 5
   log_every_iters: 1
   torch_threads: auto               # threads PyTorch du processus principal
+  prevent_sleep: true               # Windows : pas de mise en veille automatique pendant l'entraînement
+  collect_device: cpu               # inférence pendant la collecte (petits lots : le CPU est plus rapide qu'un GPU)
 
 logging:
   wandb: auto                       # auto | online | offline | off

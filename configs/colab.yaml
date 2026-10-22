@@ -1,0 +1,21 @@
+# Google Colab gratuit (2 vCPU, GPU T4, sessions de ~12 h max, coupées si l'onglet reste inactif).
+# Avec 2 vCPU la collecte est le goulot : collecte locale sur les 2 cœurs (l'apprentissage est sur le GPU), ou
+# collecte centrale avec inférence sur le T4 si scripts/autotune.py la mesure plus rapide (Colab Pro : plus de cœurs).
+ppo:
+  device: cuda
+  batch_steps: 50_000
+  minibatch_size: 25_000
+  device_chunk: 8_192          # pic mémoire GPU ÷3 (25 000 a saturé une T4 après ~45 min : fragmentation)
+  batch_on_device: auto
+train:
+  collect_mode: local
+  n_workers: all
+  envs_per_worker: 24
+  collect_pipeline: 2          # (mode central)
+  collect_device: auto         # (mode central) inférence sur le T4
+  torch_threads: 1
+  async_collect: true
+  checkpoint_every_steps: 1_000_000
+  prevent_sleep: false
+logging:
+  wandb: off

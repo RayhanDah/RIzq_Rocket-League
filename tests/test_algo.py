@@ -209,3 +209,181 @@ def test_skip_padding_falls_back_for_non_prefix_masks():
 def load_config_default():
     from rlagent.config import load_config
     return load_config(["laptop"])
+
+
+def test_adaptive_kl_lr_rule_and_bounds():
+    from rlagent.algo.learner import adapt_actor_lr, make_optimizer
+    from rlagent.models.attention import build_models
+    cfg = _model_cfg()
+    actor, critic = build_models(cfg, 90)
+    opt = make_optimizer(actor, critic, cfg)
+    lr0 = opt.param_groups[0]["lr"]
+    # lr fixe (défaut) : rien ne bouge
+    assert adapt_actor_lr(opt, 1.0, cfg) == lr0
+    cfg["ppo"].update(lr_schedule="adaptive_kl", target_kl=0.01, lr_min=1e-5, lr_max=1e-3)
+    assert adapt_actor_lr(opt, 0.001, cfg) == pytest.approx(lr0 * 1.5)     # KL trop faible → lr ↑
+    assert adapt_actor_lr(opt, 0.01, cfg) == pytest.approx(lr0 * 1.5)      # dans [cible/2, 2×cible] → inchangé
+    assert adapt_actor_lr(opt, 0.05, cfg) == pytest.approx(lr0)            # KL trop fort → lr ↓
+    for _ in range(50):
+        adapt_actor_lr(opt, 0.0, cfg)
+    assert opt.param_groups[0]["lr"] == pytest.approx(1e-3)                # borne haute
+    for _ in range(100):
+        adapt_actor_lr(opt, 1.0, cfg)
+    assert opt.param_groups[0]["lr"] == pytest.approx(1e-5)                # borne basse
+    assert opt.param_groups[1]["lr"] == pytest.approx(float(cfg["ppo"]["lr_critic"]))  # critique jamais touché
+    assert adapt_actor_lr(opt, float("nan"), cfg) == pytest.approx(1e-5)
+
+
+def test_final_kl_zero_before_update_and_positive_after():
+    from rlagent.algo.collector import Trajectory
+    from rlagent.algo.gae import RunningStats
+    from rlagent.algo.learner import build_batch, final_kl, make_optimizer, ppo_update
+    from rlagent.env.obs import OBS_DIM
+    from rlagent.models.attention import build_models
+    cfg = _model_cfg()
+    cfg["ppo"].update(batch_steps=512, minibatch_size=256, device_chunk=128, epochs=2, lr_actor=3e-3)
+    torch.manual_seed(0)
+    actor, critic = build_models(cfg, 90)
+    x = np.zeros((512, OBS_DIM), dtype=np.float32)
+    x[:, -5] = 1.0
+    with torch.no_grad():
+        a, lp = actor.act(torch.as_tensor(x))
+    kl0 = final_kl(actor, torch.as_tensor(x), a, lp, torch.device("cpu"), 128)
+    assert abs(kl0) < 1e-6
+    trajs = [Trajectory([x[0]], [int(ai)], [float(li)], [1.0 if int(ai) == 7 else 0.0], None) for ai, li in zip(a, lp)]
+    batch = build_batch(trajs, critic, RunningStats(), cfg, torch.device("cpu"))
+    stats = ppo_update(actor, critic, make_optimizer(actor, critic, cfg), batch, cfg, torch.device("cpu"))
+    assert stats["kl_final"] > 0 and np.isfinite(stats["kl_final"])
+
+
+def test_kl_early_stop_only_in_adaptive_mode():
+    from rlagent.algo.collector import Trajectory
+    from rlagent.algo.gae import RunningStats
+    from rlagent.algo.learner import build_batch, make_optimizer, ppo_update
+    from rlagent.env.obs import OBS_DIM
+    from rlagent.models.attention import build_models
+    x = np.zeros((512, OBS_DIM), dtype=np.float32)
+    x[:, -5] = 1.0
+    for mode, expected_mb in (("fixed", 8), ("adaptive_kl", 1)):
+        cfg = _model_cfg()
+        cfg["ppo"].update(batch_steps=512, minibatch_size=128, device_chunk=128, epochs=2, lr_actor=3e-3,
+                          lr_schedule=mode, target_kl=1e-9, kl_stop=4.0)
+        torch.manual_seed(0)
+        actor, critic = build_models(cfg, 90)
+        with torch.no_grad():
+            a, lp = actor.act(torch.as_tensor(x))
+        trajs = [Trajectory([x[0]], [int(ai)], [float(li)], [1.0 if int(ai) == 7 else 0.0], None)
+                 for ai, li in zip(a, lp)]
+        batch = build_batch(trajs, critic, RunningStats(), cfg, torch.device("cpu"))
+        stats = ppo_update(actor, critic, make_optimizer(actor, critic, cfg), batch, cfg, torch.device("cpu"))
+        # 1er pas toujours appliqué (KL = 0 avant), puis arrêt dès que KL > 4 × cible en mode adaptive_kl
+        assert stats["n_minibatches"] == expected_mb, (mode, stats)
+        assert stats["early_stop"] == float(mode == "adaptive_kl")
+
+
+def test_policy_loss_weight_ones_is_identity():
+    from rlagent.algo.losses import policy_loss
+    torch.manual_seed(0)
+    lp, old, adv = torch.randn(64) * 0.1, torch.randn(64) * 0.1, torch.randn(64)
+    for kind in ("ppo", "spo"):
+        assert torch.allclose(policy_loss(lp, old, adv, 0.2, kind), policy_loss(lp, old, adv, 0.2, kind, torch.ones(64)))
+
+
+def _bandit_batch(actor, critic, cfg, behavior_actor=None):
+    from rlagent.algo.collector import Trajectory
+    from rlagent.algo.gae import RunningStats
+    from rlagent.algo.learner import build_batch
+    from rlagent.env.obs import OBS_DIM
+    x = np.zeros((512, OBS_DIM), dtype=np.float32)
+    x[:, -5] = 1.0
+    with torch.no_grad():
+        a, lp = (behavior_actor or actor).act(torch.as_tensor(x))
+    trajs = [Trajectory([x[0]], [int(ai)], [float(li)], [1.0 if int(ai) == 7 else 0.0], None) for ai, li in zip(a, lp)]
+    return build_batch(trajs, critic, RunningStats(), cfg, torch.device("cpu"))
+
+
+def test_decoupled_update_equals_coupled_without_lag():
+    """Sans retard de collecte (π_collecte = π_prox), l'objectif découplé est exactement l'objectif d'origine."""
+    import copy
+    from rlagent.algo.learner import make_optimizer, ppo_update
+    from rlagent.models.attention import build_models
+    cfg = _model_cfg()
+    cfg["ppo"].update(batch_steps=512, minibatch_size=256, device_chunk=128, epochs=2, lr_actor=3e-3)
+    torch.manual_seed(0)
+    actor, critic = build_models(cfg, 90)
+    batch = _bandit_batch(actor, critic, cfg)
+    results = []
+    for decoupled in (False, True):
+        a, c = copy.deepcopy(actor), copy.deepcopy(critic)
+        torch.manual_seed(1)
+        stats = ppo_update(a, c, make_optimizer(a, c, cfg), batch, cfg, torch.device("cpu"), decoupled=decoupled)
+        results.append((stats, torch.cat([p.flatten() for p in a.parameters()])))
+    (s0, p0), (s1, p1) = results
+    assert s1["behavior_kl"] < 1e-6
+    assert abs(s0["policy_loss"] - s1["policy_loss"]) < 1e-5
+    assert torch.allclose(p0, p1, atol=1e-5)
+
+
+def test_decoupled_update_with_stale_behavior_policy():
+    """Collecte faite par une politique plus ancienne : le KL de retard est mesuré, la zone de confiance est
+    centrée sur π_prox (kl_final = déplacement de CET update), et l'apprentissage progresse."""
+    import copy
+    from rlagent.algo.learner import make_optimizer, ppo_update
+    from rlagent.env.obs import OBS_DIM
+    from rlagent.models.attention import build_models
+    cfg = _model_cfg()
+    cfg["ppo"].update(batch_steps=512, minibatch_size=256, device_chunk=128, epochs=4, lr_actor=3e-3, ent_coef=0.0)
+    torch.manual_seed(0)
+    actor, critic = build_models(cfg, 90)
+    opt = make_optimizer(actor, critic, cfg)
+    x = np.zeros((1, OBS_DIM), dtype=np.float32)
+    x[0, -5] = 1.0
+    p_before = torch.softmax(actor(torch.as_tensor(x)), -1)[0, 7].item()
+    stale = copy.deepcopy(actor)
+    for it in range(30):
+        batch = _bandit_batch(actor, critic, cfg, behavior_actor=stale)   # données jouées avec 1 itération de retard
+        stale = copy.deepcopy(actor)
+        stats = ppo_update(actor, critic, opt, batch, cfg, torch.device("cpu"), decoupled=True)
+        assert np.isfinite(stats["policy_loss"]) and stats["kl_final"] >= 0
+        if it > 0:
+            assert stats["behavior_kl"] > 0
+    p_after = torch.softmax(actor(torch.as_tensor(x)), -1)[0, 7].item()
+    assert p_after > max(0.1, 4 * p_before), (p_before, p_after)
+
+
+def test_early_stop_before_any_step_logs_real_stats():
+    """Arrêt dès le 1er minibatch (retard de collecte > seuil, mode couplé) : entropie journalisée réelle, pas 0."""
+    import copy
+    from rlagent.algo.learner import make_optimizer, ppo_update
+    from rlagent.models.attention import build_models
+    cfg = _model_cfg()
+    cfg["ppo"].update(batch_steps=512, minibatch_size=256, device_chunk=128, epochs=2, lr_actor=3e-2,
+                      lr_schedule="adaptive_kl", target_kl=1e-6, kl_stop=1.0)
+    torch.manual_seed(0)
+    actor, critic = build_models(cfg, 90)
+    stale = copy.deepcopy(actor)
+    opt = make_optimizer(actor, critic, cfg)
+    ppo_update(actor, critic, opt, _bandit_batch(actor, critic, cfg), cfg, torch.device("cpu"))  # éloigne l'acteur
+    stats = ppo_update(actor, critic, opt, _bandit_batch(actor, critic, cfg, behavior_actor=stale), cfg,
+                       torch.device("cpu"))
+    assert stats["n_minibatches"] == 0 and stats["early_stop"] == 1.0
+    assert stats["entropy"] > 1.0 and stats["approx_kl"] > 0
+
+
+def test_pool_cache_holds_all_recent_versions(tmp_path, monkeypatch):
+    """Toutes les versions tirables restent en mémoire : chaque fichier n'est chargé qu'une fois."""
+    from rlagent.models.attention import build_models
+    from rlagent.selfplay.pool import OpponentPool
+    from rlagent.train import build_actor_from_model_cfg
+    cfg = _model_cfg()
+    actor, _ = build_models(cfg, 90)
+    pool = OpponentPool(tmp_path, recent=8, cache_size=4, seed=0)
+    for i in range(8):
+        pool.add(actor.state_dict(), cfg["model"], 1000 * (i + 1), 1000.0)
+    loads = []
+    real_load = torch.load
+    monkeypatch.setattr(torch, "load", lambda *a, **k: (loads.append(a[0]), real_load(*a, **k))[1])
+    for _ in range(3):
+        for e in pool.entries:
+            pool.get_actor(e, build_actor_from_model_cfg)
+    assert len(loads) == 8

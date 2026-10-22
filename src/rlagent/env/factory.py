@@ -11,7 +11,7 @@ from rlgym.rocket_league.state_mutators import MutatorSequence
 
 from .actions import make_action_parser
 from .mutators import RandomFormatMutator, StartStateMutator
-from .obs import AttentionObs
+from .obs import AttentionObs, env_obs_flags
 from .rewards import make_reward
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -69,12 +69,11 @@ def build_env(cfg: Dict[str, Any], seed: Optional[int] = None, state_mutator=Non
     from rlgym.rocket_league.sim import RocketSimEngine
 
     e = cfg["env"]
-    return RLGym(
-        state_mutator=state_mutator or MutatorSequence(
-            RandomFormatMutator(e["format_weights"], seed=seed),
-            StartStateMutator(e["start_weights"], seed=None if seed is None else seed + 1),
-        ),
-        obs_builder=AttentionObs(),
+    start = None if state_mutator is not None else StartStateMutator(
+        e["start_weights"], seed=None if seed is None else seed + 1, adaptive=bool(e.get("adaptive_drills", False)))
+    env = RLGym(
+        state_mutator=state_mutator or MutatorSequence(RandomFormatMutator(e["format_weights"], seed=seed), start),
+        obs_builder=AttentionObs(*env_obs_flags(cfg["env"])),
         action_parser=make_action_parser(e["action_repeat"]),
         reward_fn=make_reward(cfg),
         termination_cond=GoalCondition(),
@@ -84,3 +83,5 @@ def build_env(cfg: Dict[str, Any], seed: Optional[int] = None, state_mutator=Non
         ),
         transition_engine=RocketSimEngine(rlbot_delay=e.get("rlbot_delay", True)),
     )
+    env.start_mutator = start   # le worker lui renvoie la réussite des exercices (dosage automatique)
+    return env
