@@ -1,0 +1,19 @@
+# Run « s9 » (23/10/2026) : s8 avec de PETITS pas. s8 et son témoin ont régressé dès que leur KL par itération a dépassé
+# ~0,01 (runs/s8_spo_laptop/RAPPORT.md) ; à ~0,003, s8 restait stable. s9 garde l'optimiseur de s8 et vise un KL de
+# 0,003. Rewards, observations, exercices et formats de s6 inchangés. Témoin : configs/s6c.yaml (s6 continué tel quel).
+#   Portable (iGPU) : .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile laptop_s2 --profile laptop_s3 --profile laptop_s5 --profile laptop_s6 --profile s9 --run-name s9_spo_laptop
+#   (copier d'abord runs/s6_spo_kaggle/pool/actor_*.pt dans runs/s9_spo_laptop/pool/)
+train:
+  init_from: runs/s6_spo_kaggle
+ppo:
+  batch_steps: 300_000
+  minibatch_size: 100_000
+  epochs: 4
+  target_kl: 0.003         # KL ~0,002 dans s6, ~0,003 dans s8 stable ; régression au-delà de ~0,01
+  lr_max: 2.0e-3           # s8 au plafond de 2e-3 : KL 0,0014-0,005 (médiane 0,0025)
+  norm_control:
+    reset_on_init: true    # normes d'un réseau neuf + moments d'Adam remis à l'échelle (le jeu ne change pas)
+    project: true          # NaP : normes constantes après chaque pas
+selfplay:
+  anchors: [runs/s6_spo_kaggle]   # vs_anchor/s6_spo_kaggle/p_win : 5 % des épisodes contre s6 figé
+  anchor_prob: 0.25

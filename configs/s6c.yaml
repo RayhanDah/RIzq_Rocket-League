@@ -1,0 +1,8 @@
+# Témoin de s9 (23/10/2026) : s6 continué SANS rien changer (lot 50 k, plafond du lr 1e-3, normes libres). Seul ajout :
+# s6 figé comme ancre, pour mesurer le niveau comme dans s9 (vs_anchor/s6_spo_kaggle/p_win, 5 % des épisodes).
+#   Kaggle : .venv\Scripts\python cloud/kaggle_sync.py launch --run-name s6c_spo_kaggle --init runs/s6_spo_kaggle --anchors-from s6c --profiles laptop_s2 laptop_s3 laptop_s5 laptop_s6 s6c --hours 3.5
+train:
+  init_from: runs/s6_spo_kaggle
+selfplay:
+  anchors: [runs/s6_spo_kaggle]
+  anchor_prob: 0.25
