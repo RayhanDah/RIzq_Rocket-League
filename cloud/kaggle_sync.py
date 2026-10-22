@@ -308,7 +308,15 @@ def cmd_fetch(args) -> None:
     _, ref = kernel_ref(k, args.run_name)
     last = None
     while True:
-        status, msg = kernel_status(k, ref)
+        try:
+            status, msg = kernel_status(k, ref)
+        except Exception as err:  # noqa: BLE001 — coupure réseau passagère pendant une longue attente : on réessaie
+            if not args.wait:
+                raise
+            print(f"[kaggle] {time.strftime('%H:%M')} état indisponible ({type(err).__name__}) : nouvel essai dans "
+                  f"{args.poll} s", flush=True)
+            time.sleep(args.poll)
+            continue
         if status is None:
             sys.exit(f"{ref} : notebook inexistant (lancer `launch` d'abord)")
         if status != last:
