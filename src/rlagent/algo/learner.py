@@ -4,7 +4,7 @@ Même calcul sur CPU, GPU (cuda / xpu) et TPU (xla). Sur TPU, toutes les formes 
 morceau complété, cf. accel.padded_chunks) et chaque pas d'optimiseur se termine par accel.step_barrier."""
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -107,10 +107,12 @@ def batch_on_device(p: Dict[str, Any], device: torch.device) -> bool:
 
 
 def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optimizer, batch: Dict[str, np.ndarray],
-               cfg: Dict[str, Any], device: torch.device, decoupled: bool = False) -> Dict[str, float]:
+               cfg: Dict[str, Any], device: torch.device, decoupled: bool = False,
+               after_step: Optional[Callable[[], None]] = None) -> Dict[str, float]:
     """decoupled=True (collecte asynchrone) : zone de confiance centrée sur la politique au début de l'update
     (π_prox) au lieu de la politique de collecte, pondérée par w = π_prox / π_collecte (cf. losses.py).
-    Sinon SPO ramènerait la politique vers celle de collecte, en retard d'une itération."""
+    Sinon SPO ramènerait la politique vers celle de collecte, en retard d'une itération.
+    after_step : appelé après chaque pas d'optimiseur (ex. projection des normes, algo/norms.py)."""
     p = cfg["ppo"]
     device = torch.device(device)
     kind, eps = p["policy_loss"], float(p["clip_eps"])
@@ -186,6 +188,8 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optim
             nn.utils.clip_grad_norm_(actor.parameters(), float(p["max_grad_norm"]))
             nn.utils.clip_grad_norm_(critic.parameters(), float(p["max_grad_norm"]))
             optimizer.step()
+            if after_step is not None:
+                after_step()
             total = total + acc
             accel.step_barrier(device)
             n_mb += 1

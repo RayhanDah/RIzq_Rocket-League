@@ -235,7 +235,7 @@ def main() -> None:
         critic.to(dev)
         opt = make_optimizer(actor, critic, cfg)
         if state in ("herite", "normes_herite"):
-            opt.load_state_dict(ck["optimizer"])
+            opt.load_state_dict(copy.deepcopy(ck["optimizer"]))   # sur CPU, les tenseurs seraient partagés
         if state == "normes_herite":
             rescale_adam_state(opt, factors)
         return actor, critic, opt, info

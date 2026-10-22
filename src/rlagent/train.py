@@ -27,6 +27,7 @@ import torch
 import yaml
 
 from . import accel
+from .algo import norms
 from .algo.collector import make_collector
 from .algo.gae import RunningStats
 from .algo.learner import adapt_actor_lr, build_batch, make_optimizer, ppo_update
@@ -301,6 +302,12 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         prevent_idle_sleep()
 
     actor, critic = build_models(cfg, N_ACTIONS)
+    # Couches invariantes d'échelle et leurs normes de réseau neuf (cibles de ppo.norm_control, algo/norms.py)
+    si_layers = norms.model_layers(actor, critic)
+    actor_si = [(name, lin) for name, lin in si_layers if name.startswith("actor.")]
+    fresh_norms = norms.norms(si_layers)
+    norm_ctl = cfg["ppo"].get("norm_control") or {}
+    norm_targets: Optional[Dict[str, float]] = None
     actor.to(device)
     critic.to(device)
     accel.prepare_models(device, actor, critic)
@@ -321,15 +328,30 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         global_step, iteration, elo = ck["global_step"], ck["iteration"], ck.get("elo", 1000.0)
         if curriculum is not None and ck.get("curriculum"):
             curriculum.load_state_dict(ck["curriculum"])
-        if Path(resume_from).resolve().parent.parent != Path(run_dir).resolve():
+        warm_start = Path(resume_from).resolve().parent.parent != Path(run_dir).resolve()
+        if warm_start:
             # démarrage à chaud (train.init_from) : rewards peut-être différents → l'échelle des retours doit
             # pouvoir s'adapter (sinon des millions d'échantillons passés la figent)
             ret_stats.count = min(ret_stats.count, 1e6)
+        norm_targets = ck.get("norm_targets")
+        if warm_start and norm_ctl.get("reset_on_init"):
+            before = norms.flat(si_layers).norm()
+            norms.reset_norms(si_layers, fresh_norms, optimizer)
+            norm_targets = dict(fresh_norms)
+            print(f"[train] normes des couches invariantes d'échelle remises à celles d'un réseau neuf : "
+                  f"{float(before):.1f} → {float(norms.flat(si_layers).norm()):.1f} (moments d'Adam remis à l'échelle)")
         if str(cfg["ppo"].get("lr_schedule", "fixed")) != "adaptive_kl":
             # lr fixe : la config fait foi (sinon un --set ppo.lr_actor=… à la reprise serait ignoré)
             optimizer.param_groups[0]["lr"] = float(cfg["ppo"]["lr_actor"])
             optimizer.param_groups[1]["lr"] = float(cfg["ppo"]["lr_critic"])
         print(f"[train] reprise depuis {resume_from.name} (step {global_step:,})")
+
+    projector = None
+    if norm_ctl.get("project"):
+        if norm_targets is None:          # 1re activation sans remise : on garde les normes actuelles
+            norm_targets = norms.norms(si_layers)
+        projector = norms.NormProjector(si_layers, norm_targets)
+        print(f"[train] normes maintenues constantes après chaque pas (NaP) : {len(projector.items)} couches")
 
     print(f"[train] device={device} | obs={obs_dim(*env_obs_flags(cfg['env']))} | actions={N_ACTIONS} | "
           f"acteur={count_params(actor):,} params | critique={count_params(critic):,} params | "
@@ -380,6 +402,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             "optimizer": accel.to_cpu(optimizer.state_dict()),
             "ret_stats": ret_stats.state_dict(), "global_step": global_step, "iteration": iteration, "elo": elo,
             "curriculum": None if curriculum is None else curriculum.state_dict(),
+            "norm_targets": norm_targets,
             "cfg": cfg, "obs_dim": obs_dim(*env_obs_flags(cfg["env"])),
             "n_actions": N_ACTIONS, "saved_at": datetime.now().isoformat(),
         }
@@ -462,8 +485,11 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             batch = build_batch(trajs, critic, ret_stats, cfg, device)
             # minibatch du palier du lot collecté (ppo.batch_schedule), sans modifier la config sauvegardée
             upd_cfg = {**cfg, "ppo": {**cfg["ppo"], "minibatch_size": scheduled_batch(cfg, global_step - n)[1]}}
-            stats = ppo_update(actor, critic, optimizer, batch, upd_cfg, device, decoupled=decoupled)
+            si_before = norms.flat(actor_si)
+            stats = ppo_update(actor, critic, optimizer, batch, upd_cfg, device, decoupled=decoupled,
+                               after_step=projector)
             stats["lr_actor"] = adapt_actor_lr(optimizer, stats["kl_final"], cfg)
+            stats.update(norms.rotation_stats(actor_si, si_before))    # learn/si_norm, learn/si_rot_deg (acteur)
             t_learn = time.perf_counter() - t0
 
             hist_results = []

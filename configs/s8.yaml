@@ -1,0 +1,22 @@
+# Run « s8 » (phase 1 du bilan du 22/10/2026) : s6 + optimiseur réparé. Rewards, observations, exercices et formats de
+# s6 INCHANGÉS : seul l'optimiseur change, pour mesurer son effet seul. Réglages tirés du banc d'essai
+# (runs/s6_spo_kaggle/BANC_OPTIMISEUR.md). Témoin sans contrôle des normes : configs/s8t.yaml (Kaggle).
+#   Portable (iGPU) : .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile laptop_s2 --profile laptop_s3 --profile laptop_s5 --profile laptop_s6 --profile s8 --run-name s8_spo_laptop
+#   (copier d'abord runs/s6_spo_kaggle/pool/actor_*.pt dans runs/s8_spo_laptop/pool/)
+train:
+  init_from: runs/s6_spo_kaggle
+ppo:
+  # banc : à KL égal, 2× le gain en validation du lot de 50 k, et ce gain devient significatif
+  batch_steps: 300_000
+  minibatch_size: 100_000
+  epochs: 4
+  # normes remises : KL 0,006 à lr 1e-3 et 0,10 à 3e-3 (banc) → plafond 2e-3 ; garde-fou KL (4 × cible) inchangé
+  lr_max: 2.0e-3
+  norm_control:
+    reset_on_init: true    # normes d'un réseau neuf + moments d'Adam remis à l'échelle (le jeu ne change pas)
+    project: true          # NaP : normes constantes après chaque pas → le lr effectif ne dérive plus
+selfplay:
+  # niveau mesuré en continu contre s6 figé (vs_anchor/s6_spo_kaggle/p_win) : 25 % des épisodes contre l'historique,
+  # soit 5 % du total
+  anchors: [runs/s6_spo_kaggle]
+  anchor_prob: 0.25

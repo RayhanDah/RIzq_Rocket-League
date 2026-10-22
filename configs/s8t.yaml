@@ -1,0 +1,14 @@
+# Témoin de s8 (phase 1 du bilan du 22/10/2026) : mêmes réglages que s8 SANS contrôle des normes (poids et Adam de s6
+# tels quels). Les deux runs peuvent atteindre la même cible de KL ; seule la dérive des normes les sépare.
+#   Kaggle : .venv\Scripts\python cloud/kaggle_sync.py launch --run-name s8t_spo_kaggle --init runs/s6_spo_kaggle --anchors-from s8t --profiles laptop_s2 laptop_s3 laptop_s5 laptop_s6 s8t --hours 3.5
+train:
+  init_from: runs/s6_spo_kaggle
+ppo:
+  batch_steps: 300_000
+  minibatch_size: 100_000
+  epochs: 4
+  # banc : avec l'Adam hérité, il faut lr 2,7e-3 pour KL 0,01 → plafond 5e-3 pour que le contrôleur l'atteigne
+  lr_max: 5.0e-3
+selfplay:
+  anchors: [runs/s6_spo_kaggle]
+  anchor_prob: 0.25
