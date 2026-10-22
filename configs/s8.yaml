@@ -10,8 +10,10 @@ ppo:
   batch_steps: 300_000
   minibatch_size: 100_000
   epochs: 4
-  # normes remises : KL 0,006 à lr 1e-3 et 0,10 à 3e-3 (banc) → plafond 2e-3 ; garde-fou KL (4 × cible) inchangé
-  lr_max: 2.0e-3
+  # Le banc (KL 0,006 à lr 1e-3) mesurait le 1er pas, porté par l'élan hérité d'Adam. En régime, s8 donnait KL ≈ 0,0025 au
+  # plafond de 2e-3 : relevé à 6e-3 le 22/10 à 22:03 (décision PO). Le contrôleur se stabilise vers 3e-3 ; garde-fou KL
+  # (4 × cible) inchangé.
+  lr_max: 6.0e-3
   norm_control:
     reset_on_init: true    # normes d'un réseau neuf + moments d'Adam remis à l'échelle (le jeu ne change pas)
     project: true          # NaP : normes constantes après chaque pas → le lr effectif ne dérive plus
