@@ -121,7 +121,7 @@ class OpponentPool:
     def __len__(self) -> int:
         return len(self.entries)
 
-    def add(self, actor_state: dict, model_cfg: dict, global_step: int, elo: float) -> None:
+    def add(self, actor_state: dict, model_cfg: dict, global_step: int, elo: float) -> str:
         import torch
         path = self.dir / f"actor_{global_step:013d}.pt"
         tmp = path.with_suffix(".tmp")
@@ -130,6 +130,7 @@ class OpponentPool:
         entry = {"id": path.stem, "path": path, "elo": elo, "step": global_step}
         with self._lock:  # nouvelle liste : un sample() concurrent ne voit jamais une liste en cours de tri
             self.entries = sorted(self.entries + [entry], key=lambda e: e["step"])
+        return entry["id"]
 
     # ------------------------------------------------------------------ ancres
     def _load_anchors(self, specs: Iterable[Union[str, Path]], root: Optional[Path], refrozen: List[str]) -> List[Dict]:
@@ -174,7 +175,9 @@ class OpponentPool:
         src = torch.load(src_file, map_location="cpu", weights_only=False)
         model_cfg = dict(src.get("model_cfg") or src["cfg"]["model"])
         # Les anciens runs (≤ s5) n'enregistraient pas self_dim : on le lit sur la 1re couche du jeton « soi »
-        model_cfg["self_dim"] = int(src["actor"]["encoder.self_embed.0.weight"].shape[1])
+        # (acteur à attention ; un acteur MLP l'a toujours dans model_cfg)
+        if "encoder.self_embed.0.weight" in src["actor"]:
+            model_cfg["self_dim"] = int(src["actor"]["encoder.self_embed.0.weight"].shape[1])
         data = {"actor": src["actor"], "model_cfg": model_cfg, "global_step": int(src.get("global_step", 0)),
                 "elo": float(src.get("elo", 1000.0)),
                 "anchor": {"spec": spec, "source": str(src_file), "frozen_at": datetime.now().isoformat()}}

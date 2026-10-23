@@ -245,14 +245,16 @@ def cmd_launch(args) -> None:
     if args.fresh and not args.init:
         state.pop(args.run_name, None)
     sources = [meshes]
-    if args.init:
+    if args.init or (args.anchors_from and (status is None or args.fresh or args.dry_run)):
+        # --init : démarrage à chaud ; --anchors-from seul (1re session d'un run de zéro) : ancres seules
         from make_cloud_bundle import build_init_zip
 
         WORK.mkdir(parents=True, exist_ok=True)
-        init_zip = build_init_zip(Path(args.init), args.anchors_from, WORK)
-        sources.append(upload_dataset(k, INIT_DATASET, "rl agent init", [init_zip], f"{args.run_name} depuis {args.init}")
+        init_zip = build_init_zip(Path(args.init) if args.init else None, args.anchors_from, WORK)
+        sources.append(upload_dataset(k, INIT_DATASET, "rl agent init", [init_zip],
+                                      f"{args.run_name} depuis {args.init or 'zéro (ancres seules)'}")
                        if k else f"{username(k)}/{INIT_DATASET}")
-        state[args.run_name] = {"init": args.init}
+        state[args.run_name] = {"init": args.init or "anchors-only"}
     elif state.get(args.run_name, {}).get("init"):
         # le notebook ne s'en sert que si le run n'a encore aucun checkpoint (1re session interrompue trop tôt)
         sources.append(f"{username(k)}/{INIT_DATASET}")

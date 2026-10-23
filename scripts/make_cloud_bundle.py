@@ -15,9 +15,11 @@ Les collision meshes (ton dump) se déposent à part, tels quels : dossier colli
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import zipfile
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -50,25 +52,32 @@ def build_code_zip(code: Path) -> int:
     return n
 
 
-def build_init_zip(run: Path, anchors_from, out: Path) -> Path:
-    """rl-agent-init.zip : dernier checkpoint de `run` + son pool (+ ancres figées de `anchors_from`)."""
+def build_init_zip(run: Optional[Path], anchors_from, out: Path) -> Path:
+    """rl-agent-init.zip : dernier checkpoint de `run` + son pool (+ ancres figées de `anchors_from`).
+    run = None : run de zéro, ancres seules (le notebook repère alors le point de départ par init.json)."""
     from rlagent.train import find_latest_checkpoint
 
-    if not run.is_absolute():
-        run = ROOT / run
-    ckpt = find_latest_checkpoint(run)
-    if ckpt is None:
-        sys.exit(f"aucun checkpoint dans {run}")
+    ckpt, pool = None, []
+    if run is not None:
+        if not run.is_absolute():
+            run = ROOT / run
+        ckpt = find_latest_checkpoint(run)
+        if ckpt is None:
+            sys.exit(f"aucun checkpoint dans {run}")
+        pool = sorted((run / "pool").glob("actor_*.pt"))
     init = out / "rl-agent-init.zip"
     with zipfile.ZipFile(init, "w", zipfile.ZIP_STORED) as zf:
-        zf.write(ckpt, "ckpt.pt")
-        pool = sorted((run / "pool").glob("actor_*.pt"))
+        if ckpt is not None:
+            zf.write(ckpt, "ckpt.pt")
         for f in pool:
             zf.write(f, f"pool/{f.name}")
         anchors = freeze_anchors(anchors_from, out / "anchors") if anchors_from else []
         for f in anchors:
             zf.write(f, f"pool/anchors/{f.name}")
-    print(f"{init} : {ckpt.name} + {len(pool)} adversaires + {len(anchors)} ancres, {init.stat().st_size / 1e6:.1f} Mo")
+        zf.writestr("init.json", json.dumps({"run": None if run is None else str(run.name),
+                                             "anchors": [f.name for f in anchors]}))
+    print(f"{init} : {ckpt.name if ckpt else 'de zéro'} + {len(pool)} adversaires + {len(anchors)} ancres, "
+          f"{init.stat().st_size / 1e6:.1f} Mo")
     return init
 
 

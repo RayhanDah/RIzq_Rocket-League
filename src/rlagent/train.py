@@ -32,9 +32,11 @@ from .algo.collector import make_collector
 from .algo.gae import RunningStats
 from .algo.learner import adapt_actor_lr, build_batch, make_optimizer, ppo_update
 from .config import load_config
+from .curriculum import SkillCurriculum
 from .env.actions import N_ACTIONS
 from .env.obs import env_obs_flags, obs_dim
-from .models.attention import Actor, actor_from_model_cfg, build_models, count_params
+from .models.attention import Actor, actor_from_model_cfg, actor_self_dim, build_models, count_params
+from .selfplay.ladder import Ladder
 from .selfplay.pool import OpponentPool, anchor_name, elo_update
 from .utils.logger import MetricsLogger
 
@@ -305,6 +307,8 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
     # Couches invariantes d'échelle et leurs normes de réseau neuf (cibles de ppo.norm_control, algo/norms.py)
     si_layers = norms.model_layers(actor, critic)
     actor_si = [(name, lin) for name, lin in si_layers if name.startswith("actor.")]
+    if not actor_si:   # MLP sans LayerNorm : rotation / norme mesurées sur toutes les couches de l'acteur
+        actor_si = [(f"actor.{n}", m) for n, m in actor.named_modules() if isinstance(m, torch.nn.Linear)]
     fresh_norms = norms.norms(si_layers)
     norm_ctl = cfg["ppo"].get("norm_control") or {}
     norm_targets: Optional[Dict[str, float]] = None
@@ -315,6 +319,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
     ret_stats = RunningStats()
     global_step, iteration, elo = 0, 0, 1000.0
     curriculum = DrillCurriculum.from_cfg(cfg)
+    skills = SkillCurriculum.from_cfg(cfg)
 
     if resume_from is not None:
         # XLA : chargé sur CPU puis copié dans les paramètres (torch.load ne sait pas placer sur un TPU)
@@ -329,6 +334,8 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         if curriculum is not None and ck.get("curriculum"):
             curriculum.load_state_dict(ck["curriculum"])
         warm_start = Path(resume_from).resolve().parent.parent != Path(run_dir).resolve()
+        if skills is not None and ck.get("skill_curriculum") and not warm_start:
+            skills.load_state_dict(ck["skill_curriculum"])
         if warm_start:
             # démarrage à chaud (train.init_from) : rewards peut-être différents → l'échelle des retours doit
             # pouvoir s'adapter (sinon des millions d'échantillons passés la figent)
@@ -375,7 +382,26 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             raise ValueError(f"selfplay.anchors : l'ancre {a['name']} ne peut pas jouer dans cet env ({err})") from err
         if n_out != N_ACTIONS:
             raise ValueError(f"selfplay.anchors : l'ancre {a['name']} a {n_out} actions (attendu {N_ACTIONS})")
-        print(f"[train] ancre {a['name']} : step {a['step']:,}, bloc « soi » {a_actor.encoder.self_dim}")
+        print(f"[train] ancre {a['name']} : step {a['step']:,}, bloc « soi » {actor_self_dim(a_actor)}")
+    # Échelle Elo absolue (selfplay/ladder.py) : la version de départ (réseau aléatoire) en est l'origine (Elo 0) et
+    # le premier adversaire du pool
+    ladder = Ladder(run_dir / "ladder.json") if sp_cfg.get("ladder", False) else None
+    anchor_ids = {a["id"]: a["name"] for a in pool.anchors}
+    if ladder is not None and global_step == 0 and len(pool) == 0:
+        ladder.add_version(pool.add({k: v.cpu() for k, v in actor.state_dict().items()}, cfg["model"], 0, elo), 0)
+        ladder.save()
+
+    def apply_stage_ppo() -> None:
+        """lr du palier courant du curriculum (curriculum.py), s'il en fixe un."""
+        o = {} if skills is None else skills.ppo_overrides()
+        if "lr_actor" in o and str(cfg["ppo"].get("lr_schedule", "fixed")) != "adaptive_kl":
+            optimizer.param_groups[0]["lr"] = o["lr_actor"]
+        if "lr_critic" in o:
+            optimizer.param_groups[1]["lr"] = o["lr_critic"]
+
+    apply_stage_ppo()
+    if skills is not None:
+        print(f"[train] curriculum : palier {skills.index + 1}/{len(skills.stages)} « {skills.name} »")
     logger = MetricsLogger(run_dir, cfg)
     stop_file = run_dir / "STOP"
     if stop_file.exists():
@@ -402,6 +428,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             "optimizer": accel.to_cpu(optimizer.state_dict()),
             "ret_stats": ret_stats.state_dict(), "global_step": global_step, "iteration": iteration, "elo": elo,
             "curriculum": None if curriculum is None else curriculum.state_dict(),
+            "skill_curriculum": None if skills is None else skills.state_dict(),
             "norm_targets": norm_targets,
             "cfg": cfg, "obs_dim": obs_dim(*env_obs_flags(cfg["env"])),
             "n_actions": N_ACTIONS, "saved_at": datetime.now().isoformat(),
@@ -450,8 +477,13 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
 
     def sync_workers() -> None:
         collector.set_global_step(global_step)
+        info: Dict[str, Any] = {}
         if curriculum is not None:
-            collector.set_info({"drill_levels": dict(curriculum.levels)})
+            info["drill_levels"] = dict(curriculum.levels)
+        if skills is not None:
+            info["reward_weights"] = skills.weights(global_step)
+        if info:
+            collector.set_info(info)
 
     def start_collect():
         sync_workers()
@@ -484,7 +516,9 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             t0 = time.perf_counter()
             batch = build_batch(trajs, critic, ret_stats, cfg, device)
             # minibatch du palier du lot collecté (ppo.batch_schedule), sans modifier la config sauvegardée
-            upd_cfg = {**cfg, "ppo": {**cfg["ppo"], "minibatch_size": scheduled_batch(cfg, global_step - n)[1]}}
+            stage_ppo = {} if skills is None else {k: v for k, v in skills.ppo_overrides().items() if k == "ent_coef"}
+            upd_cfg = {**cfg, "ppo": {**cfg["ppo"], "minibatch_size": scheduled_batch(cfg, global_step - n)[1],
+                                      **stage_ppo}}
             si_before = norms.flat(actor_si)
             stats = ppo_update(actor, critic, optimizer, batch, upd_cfg, device, decoupled=decoupled,
                                after_step=projector)
@@ -499,6 +533,9 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                     if anchor_name(e["vs_hist"]["hist_id"]) is None:  # l'Elo d'une ancre est celui d'un autre run
                         elo = elo_update(elo, e["vs_hist"]["hist_elo"], _hist_score(e), float(sp["elo_k"]))
             pool.record_results(hist_results)  # scores glissants PFSP / ancres (sans effet si options désactivées)
+            if ladder is not None:
+                ladder.record(hist_results, anchors=anchor_ids)
+                ladder.fit()
 
             metrics = {
                 "global_step": global_step, "iteration": iteration, "elo": elo,
@@ -512,7 +549,14 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                 **{f"learn/{k}": v for k, v in stats.items()},
                 **summarize_episodes(episodes),
                 **pool.metrics(),
+                **({} if ladder is None else ladder.metrics(anchor_ids)),
             }
+            if skills is not None:
+                msg = skills.update(metrics, global_step)
+                if msg:
+                    print(f"[train] {msg}")
+                    apply_stage_ppo()
+                metrics.update(skills.metrics(global_step))
             if not all(math.isfinite(v) for v in (stats["policy_loss"], stats["value_loss"])):
                 # Les poids viennent d'être mis à jour avec des NaN : on ne sauvegarde SURTOUT pas,
                 # pour que la reprise reparte du dernier checkpoint sain.
@@ -526,8 +570,12 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                 save_checkpoint(run_dir, make_state(), int(tr["keep_checkpoints"]))
                 next_ckpt += int(tr["checkpoint_every_steps"])
             if global_step >= next_pool:
-                pool.add({k: v.cpu() for k, v in actor.state_dict().items()}, cfg["model"], global_step, elo)
+                vid = pool.add({k: v.cpu() for k, v in actor.state_dict().items()}, cfg["model"], global_step, elo)
+                if ladder is not None:
+                    ladder.add_version(vid, global_step)
                 next_pool += int(sp["pool_every_steps"])
+            if ladder is not None:
+                ladder.save()
     finally:
         if pending is not None:  # lot en cours de collecte : on attend la fin des workers, puis on l'abandonne
             try:

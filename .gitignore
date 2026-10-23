@@ -14,6 +14,8 @@ settings.txt
 # Notes et fichiers locaux (non publiés)
 bot/model.pt
 REVUE_STRATEGIE.md
+AUTRE_PC.md
+configs/pc3060.yaml
 dist/
 mlflow.db
 mlruns/

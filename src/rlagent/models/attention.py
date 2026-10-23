@@ -151,15 +151,32 @@ class Critic(nn.Module):
         return self.head(self.encoder(fit_obs(obs, self.encoder.self_dim))).squeeze(-1)
 
 
-def actor_from_model_cfg(model_cfg: Dict, n_actions: int) -> Actor:
+def is_mlp(model_cfg: Dict) -> bool:
+    """`model.type` : attention (défaut, ARCHITECTURE §5) | mlp (models/mlp.py, profil s10)."""
+    return str(model_cfg.get("type", "attention")) == "mlp"
+
+
+def actor_from_model_cfg(model_cfg: Dict, n_actions: int) -> nn.Module:
     """Acteur seul à partir d'une section `model` (versions du pool, ancres, workers en collecte locale)."""
+    if is_mlp(model_cfg):
+        from .mlp import MLPActor
+        return MLPActor(n_actions, tuple(model_cfg["actor_hidden"]), int(model_cfg.get("self_dim", SELF_DIM)))
     return Actor(n_actions, d_model=model_cfg["d_model"], n_heads=model_cfg["n_heads"],
                  n_layers=model_cfg["n_layers"], ff_mult=model_cfg["ff_mult"],
                  head_hidden=tuple(model_cfg["head_hidden"]), self_dim=int(model_cfg.get("self_dim", SELF_DIM)))
 
 
+def actor_self_dim(actor: nn.Module) -> int:
+    """Taille du bloc « soi » qu'attend un acteur (attention ou MLP)."""
+    return int(actor.encoder.self_dim if isinstance(actor, Actor) else actor.self_dim)
+
+
 def build_models(cfg: Dict, n_actions: int):
     m = cfg["model"]
+    if is_mlp(m):
+        from .mlp import MLPActor, MLPCritic
+        sd = int(m.get("self_dim", SELF_DIM))
+        return MLPActor(n_actions, tuple(m["actor_hidden"]), sd), MLPCritic(tuple(m["critic_hidden"]), sd)
     kw = dict(d_model=m["d_model"], n_heads=m["n_heads"], n_layers=m["n_layers"], ff_mult=m["ff_mult"],
               head_hidden=tuple(m["head_hidden"]), self_dim=int(m.get("self_dim", SELF_DIM)))
     return Actor(n_actions, **kw), Critic(**kw)

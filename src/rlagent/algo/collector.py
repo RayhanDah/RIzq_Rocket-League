@@ -158,7 +158,7 @@ class Rollout:
             members.sort(key=lambda m: m[0])
             stack = self._stack(tuple(m[0] for m in members), [m[1] for m in members], h_dev)
             x = torch.as_tensor(pad_stack([m[3] for m in members]), device=h_dev)
-            logits = stack.logits(fit_obs(x, stack.template.encoder.self_dim))       # [K, B_max, n_actions]
+            logits = stack.logits(fit_obs(x, stack.self_dim))                        # [K, B_max, n_actions]
             h_act = torch.distributions.Categorical(logits=logits, validate_args=False).sample()
             hist_out.append(([m[2] for m in members], h_act))
 

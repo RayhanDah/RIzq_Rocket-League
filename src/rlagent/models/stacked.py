@@ -29,9 +29,24 @@ def _plain_mlp(seq: nn.Sequential) -> bool:
                for m in seq)
 
 
+def _mlp_signature(actor: nn.Module) -> Optional[Tuple]:
+    """Acteur MLP (models/mlp.py) : Linear / ReLU en alternance, terminé par une Linear."""
+    from .mlp import MLPActor
+    if type(actor) is not MLPActor or actor.training:
+        return None
+    mods = list(actor.net)
+    if not (isinstance(mods[-1], nn.Linear) and all(isinstance(m, nn.Linear) == (i % 2 == 0)
+                                                     and isinstance(m, (nn.Linear, nn.ReLU))
+                                                     for i, m in enumerate(mods))):
+        return None
+    return "mlp", actor.self_dim, tuple((n, tuple(p.shape)) for n, p in actor.named_parameters())
+
+
 def stack_signature(actor: nn.Module) -> Optional[Tuple]:
     """Clé d'architecture : deux acteurs de même clé s'empilent. None = architecture non prise en charge."""
-    if type(actor) is not Actor or actor.training:
+    if type(actor) is not Actor:
+        return _mlp_signature(actor)
+    if actor.training:
         return None
     enc = actor.encoder
     if enc.transformer.norm is not None:
@@ -52,9 +67,11 @@ def stack_signature(actor: nn.Module) -> Optional[Tuple]:
 class StackedActors:
     """Poids de K acteurs de même `stack_signature`, empilés sur le device du premier. Poids figés (copie)."""
 
-    def __init__(self, actors: Sequence[Actor]):
+    def __init__(self, actors: Sequence[nn.Module]):
         self.template = actors[0]
         self.k = len(actors)
+        self.is_mlp = type(self.template) is not Actor
+        self.self_dim = int(self.template.self_dim if self.is_mlp else self.template.encoder.self_dim)
         per = [dict(a.named_parameters()) for a in actors]
         self.p: Dict[str, torch.Tensor] = {}
         for name in per[0]:
@@ -81,6 +98,11 @@ class StackedActors:
     @torch.no_grad()
     def logits(self, obs: torch.Tensor) -> torch.Tensor:
         """obs [K, B, D] (déjà au format de ces acteurs, cf. `fit_obs`) → logits [K, B, n_actions]."""
+        if self.is_mlp:
+            x = obs
+            for i, m in enumerate(self.template.net):
+                x = self._linear(x, f"net.{i}") if isinstance(m, nn.Linear) else F.relu(x)
+            return x
         K, B, _ = obs.shape
         enc = self.template.encoder
         sd, T, d = enc.self_dim, MAX_OTHERS + 1, enc.d_model

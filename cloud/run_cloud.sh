@@ -120,13 +120,14 @@ if [ -n "${INIT_DIR:-}" ] && [ -f "$INIT_DIR/ckpt.pt" ]; then
   if [ -z "$(ls -A "$RUN_DIR/checkpoints" 2>/dev/null || true)" ]; then
     cp -n "$INIT_DIR"/pool/*.pt "$RUN_DIR/pool/" 2>/dev/null || true
   fi
-  # adversaires fixes déjà figés (make_cloud_bundle.py --anchors-from) : les runs sources n'existent pas ici
-  if [ -d "$INIT_DIR/pool/anchors" ]; then
-    mkdir -p "$RUN_DIR/pool/anchors"
-    cp -n "$INIT_DIR"/pool/anchors/*.pt "$RUN_DIR/pool/anchors/" 2>/dev/null || true
-  fi
 else
   INIT=(--set "train.init_from=")
+fi
+# adversaires fixes déjà figés (make_cloud_bundle.py --anchors-from) : les runs sources n'existent pas ici.
+# Aussi pour un run de zéro (point de départ « ancres seules », repéré par init.json)
+if [ -n "${INIT_DIR:-}" ] && [ -d "$INIT_DIR/pool/anchors" ]; then
+  mkdir -p "$RUN_DIR/pool/anchors"
+  cp -n "$INIT_DIR"/pool/anchors/*.pt "$RUN_DIR/pool/anchors/" 2>/dev/null || true
 fi
 
 # 5) Autoréglage (quelques minutes) : devices + mode de collecte + workers × arènes sur CETTE machine

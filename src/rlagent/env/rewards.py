@@ -75,18 +75,22 @@ class TouchTerm(RewardTerm):
 
 class VelPlayerToBallTerm(RewardTerm):
     """Vitesse vers la balle / 2300. `cap` (uu/s) : vitesse au-delà de laquelle on ne paie plus (s7d : 1410, vitesse
-    max sans boost) : l'aide paie le fait d'aller vers la balle, pas celui de brûler son boost pour y aller."""
+    max sans boost) : l'aide paie le fait d'aller vers la balle, pas celui de brûler son boost pour y aller.
+    `signed` (s10, comme GigaLearn) : s'éloigner de la balle coûte autant que s'en approcher rapporte."""
     name = "vel_player_to_ball"
 
-    def __init__(self, cap: Optional[float] = None):
+    def __init__(self, cap: Optional[float] = None, signed: bool = False):
         self.cap = None if cap is None else float(cap)
+        self.signed = bool(signed)
 
     def get(self, agents, state, shared_info):
         ball = state.ball.position.tolist()
         out = {}
         for a in agents:
             p = state.cars[a].physics
-            v = max(0.0, _dot_dir(p.linear_velocity.tolist(), p.position.tolist(), ball))
+            v = _dot_dir(p.linear_velocity.tolist(), p.position.tolist(), ball)
+            if not self.signed:
+                v = max(0.0, v)
             out[a] = (v if self.cap is None else min(v, self.cap)) / cv.CAR_MAX_SPEED
         return out
 
@@ -648,6 +652,82 @@ class ConcedeTerm(RewardTerm):
         return {a: (-1.0 if state.cars[a].team_num != state.scoring_team else 0.0) for a in agents}
 
 
+class StrongTouchTerm(RewardTerm):
+    """Frappe forte (s10, `StrongTouchReward` de GigaLearn) : à chaque touche, gain de vitesse de la balle |Δv|,
+    0 sous `min_speed` (simples contacts, conduites de balle), puis |Δv| / `max_speed` plafonné à 1.
+    Défauts = 20 et 100 km/h. Pousse à frapper fort (flip dans la balle) plutôt qu'à pousser la balle."""
+    name = "strong_touch"
+
+    def __init__(self, min_speed: float = 556.0, max_speed: float = 2778.0):
+        self.min_speed, self.max_speed = float(min_speed), float(max_speed)
+        self.prev_ball_vel = np.zeros(3, dtype=np.float32)
+
+    def reset(self, agents, state, shared_info):
+        self.prev_ball_vel = np.asarray(state.ball.linear_velocity, dtype=np.float32).copy()
+
+    def get(self, agents, state, shared_info):
+        vel = np.asarray(state.ball.linear_velocity, dtype=np.float32)
+        dv = norm3(vel - self.prev_ball_vel)
+        self.prev_ball_vel = vel.copy()
+        r = 0.0 if dv < self.min_speed else min(1.0, dv / self.max_speed)
+        return {a: (r if state.cars[a].ball_touches > 0 else 0.0) for a in agents}
+
+
+def _contact_victim(car) -> Optional[str]:
+    return getattr(car, "bump_victim_id", None)
+
+
+class DemoTerm(RewardTerm):
+    """+1 quand on démolit un adversaire (s10). L'auteur est la voiture dont le dernier contact est la victime
+    (`bump_victim_id`) ; à défaut, l'adversaire le plus proche de la victime. Dans `zero_sum_terms` : la victime
+    reçoit l'opposé."""
+    name = "demo"
+
+    def __init__(self):
+        self.demoed: Dict[str, bool] = {}
+
+    def reset(self, agents, state, shared_info):
+        self.demoed = {a: bool(state.cars[a].is_demoed) for a in agents}
+
+    def get(self, agents, state, shared_info):
+        out = {a: 0.0 for a in agents}
+        for v in agents:
+            victim = state.cars[v]
+            now = bool(victim.is_demoed)
+            if now and not self.demoed.get(v, now):
+                opps = [a for a in agents if state.cars[a].team_num != victim.team_num]
+                authors = [a for a in opps if _contact_victim(state.cars[a]) == v]
+                if not authors and opps:
+                    authors = [min(opps, key=lambda a: norm3(state.cars[a].physics.position - victim.physics.position))]
+                for a in authors[:1]:
+                    out[a] += 1.0
+            self.demoed[v] = now
+        return out
+
+
+class BumpTerm(RewardTerm):
+    """+1 au début de chaque contact avec un adversaire (s10, `BumpReward` de GigaLearn) : le contact dure le temps
+    du délai de RocketSim (`bump_victim_id` non vide), il n'est payé qu'une fois. Dans `zero_sum_terms` : la victime
+    reçoit l'opposé."""
+    name = "bump"
+
+    def __init__(self):
+        self.prev: Dict[str, Optional[str]] = {}
+
+    def reset(self, agents, state, shared_info):
+        self.prev = {a: _contact_victim(state.cars[a]) for a in agents}
+
+    def get(self, agents, state, shared_info):
+        out = {}
+        for a in agents:
+            car = state.cars[a]
+            victim = _contact_victim(car)
+            new = victim is not None and victim != self.prev.get(a) and victim in state.cars
+            out[a] = 1.0 if new and state.cars[victim].team_num != car.team_num else 0.0
+            self.prev[a] = victim
+        return out
+
+
 def linear_schedule(start: float, end: float, steps: float, t: float) -> float:
     if steps <= 0:
         return end
@@ -656,28 +736,37 @@ def linear_schedule(start: float, end: float, steps: float, t: float) -> float:
 
 
 class TeamReward(RewardFunction[str, GameState, float]):
+    """`stage_weights` : poids possibles des paliers du curriculum (`curriculum.stages`, curriculum.py). Les termes
+    utilisés par au moins un palier sont construits dès le départ ; les poids du moment arrivent par
+    shared_info["reward_weights"] (envoyés par le processus principal) et remplacent alors `weights`."""
+
     def __init__(self, terms: List[RewardTerm], weights: Dict[str, float],
                  anneal: Optional[Dict[str, Dict[str, float]]] = None,
                  team_spirit: Optional[Dict[str, float]] = None, zero_sum: float = 1.0,
-                 zero_sum_terms: Optional[List[str]] = None):
-        self.terms = [t for t in terms if weights.get(t.name, 0.0) != 0.0]
+                 zero_sum_terms: Optional[List[str]] = None,
+                 stage_weights: Optional[List[Dict[str, float]]] = None):
+        used = [weights] + list(stage_weights or [])
+        self.terms = [t for t in terms if any(w.get(t.name, 0.0) != 0.0 for w in used)]
         self.weights = dict(weights)
         self.anneal = anneal or {}
         self.team_spirit = team_spirit or {"start": 0.0, "end": 0.0, "steps": 1}
         self.zero_sum = zero_sum
         self.zero_sum_terms = None if zero_sum_terms is None else set(zero_sum_terms)
+        self._override: Optional[Dict[str, float]] = None
 
-    def _weights_at(self, step: float) -> Dict[str, float]:
-        if getattr(self, "_cached_step", None) != step:
+    def _weights_at(self, step: float, override: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+        if getattr(self, "_cached_step", None) != step or override is not self._override:
             self._cached_step = step
-            self._cached_weights = {t.name: self.current_weight(t.name, step) for t in self.terms}
+            self._override = override        # référence gardée : un nouveau dict envoyé = nouveau calcul
+            self._cached_weights = {t.name: self.current_weight(t.name, step, override) for t in self.terms}
             self._cached_tau = self.current_tau(step)
         return self._cached_weights
 
-    def current_weight(self, name: str, step: float) -> float:
+    def current_weight(self, name: str, step: float, override: Optional[Dict[str, float]] = None) -> float:
         """Poids × multiplicateur de décroissance : 1 jusqu'au step `begin` (0 par défaut), puis linéaire jusqu'à
-        `end` en `steps` pas. `begin` sert aux démarrages à chaud (compteur de steps hérité d'un autre run)."""
-        w = self.weights.get(name, 0.0)
+        `end` en `steps` pas. `begin` sert aux démarrages à chaud (compteur de steps hérité d'un autre run).
+        `override` : poids du palier courant du curriculum (à la place de `weights`)."""
+        w = (self.weights if override is None else override).get(name, 0.0)
         sched = self.anneal.get(name)
         if sched:
             begin = float(sched.get("begin", 0.0))
@@ -701,7 +790,7 @@ class TeamReward(RewardFunction[str, GameState, float]):
         log = shared_info.setdefault("reward_log", {})
         log_abs = shared_info.setdefault("reward_log_abs", {})
         n = max(1, len(agents))
-        weights = self._weights_at(step)
+        weights = self._weights_at(step, shared_info.get("reward_weights"))
         for term in self.terms:
             w = weights[term.name]
             vals = term.get(agents, state, shared_info)
@@ -750,7 +839,7 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
     terms = [
         GoalTerm(),
         TouchTerm(aerial_bonus=rc.get("touch_aerial_bonus", 1.0)),
-        VelPlayerToBallTerm(cap=rc.get("vel_player_to_ball_cap")),
+        VelPlayerToBallTerm(cap=rc.get("vel_player_to_ball_cap"), signed=rc.get("vel_player_to_ball_signed", False)),
         VelBallToGoalTerm(),
         FaceBallTerm(),
         BoostGainTerm(loss_coef=rc.get("boost_loss_coef", 0.0), below=rc.get("boost_gain_below", 100.0)),
@@ -771,10 +860,16 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
                              support_p=rc.get("support_defend_p", 0.8)),
         AerialTouchTerm(min_z=rc.get("aerial_min_z", 220.0)),
         AirApproachTerm(),
-        FlipSpeedTerm(),
+        FlipSpeedTerm(min_speed=rc.get("flip_speed_min_speed", 1000.0)),
         KickoffRushTerm(),
         KickoffWinTerm(),
         ConcedeTerm(),
+        # s10 (refonte du 23/10/2026)
+        StrongTouchTerm(min_speed=rc.get("strong_touch_min_speed", 556.0),
+                        max_speed=rc.get("strong_touch_max_speed", 2778.0)),
+        DemoTerm(),
+        BumpTerm(),
     ]
+    stages = (cfg.get("curriculum") or {}).get("stages") or []
     return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0),
-                      rc.get("zero_sum_terms"))
+                      rc.get("zero_sum_terms"), stage_weights=[s.get("rewards") or {} for s in stages])

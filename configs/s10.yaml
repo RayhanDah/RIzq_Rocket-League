@@ -1,0 +1,98 @@
+# Run « s10 » (23/10/2026) : NOUVEL AGENT, DE ZÉRO (refonte, cf. REFONTE_S10.md).
+# On abandonne nos variantes maison (SPO + lr piloté par le KL, acteur à attention, 3 formats, 6 exercices, ~20 termes
+# de rewards, démarrages à chaud en chaîne) pour la recette de référence des bots 1v1 RLGym (rlgym-ppo / GigaLearn),
+# et on n'ajoute une difficulté que lorsque la précédente est maîtrisée (curriculum par paliers, curriculum.py).
+# Profil autonome : à utiliser SEUL avec un profil d'infra (pas de laptop_s2 … laptop_s6) :
+#   Portable : .venv-xpu\Scripts\python -m rlagent.train --profile laptop --profile laptop_xpu --profile s10 --run-name s10_ppo_laptop
+#   Kaggle   : .venv\Scripts\python cloud/kaggle_sync.py launch --run-name s10_ppo_kaggle --profiles s10 --anchors-from s10
+# Infos clés à suivre : ladder/elo (échelle Elo absolue, 0 = réseau aléatoire), ladder/anchor/s6_spo_kaggle,
+# curriculum/stage, mech/flips_per_min, touches_per_min.
+train:
+  init_from: null                  # de zéro
+env:
+  # 1v1 uniquement : le match se joue en 1v1 (README) ; 2v2/3v3 plus tard. Les profils FUSIONNENT les dictionnaires :
+  # 2 et 3 doivent être mis à 0 explicitement (sinon ceux de default.yaml restent).
+  format_weights: {1: 1.0, 2: 0.0, 3: 0.0}
+  start_weights: {kickoff: 0.5, random: 0.5}   # pas d'exercices tant que les bases ne sont pas là
+  no_touch_timeout_s: 10
+  episode_timeout_s: 300
+  ball_prediction: true            # observation de s6 (sans course ni pads) : s6 peut servir d'ancre
+  race_features: false
+  boost_features: false
+  adaptive_drills: false
+model:
+  type: mlp                        # models/mlp.py : Linear + ReLU, sans LayerNorm
+  actor_hidden: [512, 512, 512]
+  critic_hidden: [1024, 1024, 512]
+ppo:
+  policy_loss: ppo                 # PPO clippé : la référence (SPO reste disponible pour l'ablation du projet)
+  clip_eps: 0.2
+  lr_schedule: fixed               # lr fixe (guide rlgym-ppo), réduit par le curriculum au dernier palier
+  lr_actor: 2.0e-4
+  lr_critic: 2.0e-4
+  batch_steps: 100_000
+  minibatch_size: 50_000
+  epochs: 2
+  gamma: 0.99
+  gae_lambda: 0.95
+  ent_coef: 0.01
+  vf_coef: 1.0
+  max_grad_norm: 0.5
+  norm_control: null
+  # lot plus gros quand le jeu se complique : gradient moins bruité (mesure du 22/10 : signal ~4 % à 50 k)
+  batch_schedule:
+    - [0, 100_000, 50_000]
+    - [50_000_000, 200_000, 100_000]
+    - [150_000_000, 400_000, 100_000]
+rewards:
+  # Recette GigaLearn (exemple officiel), mise à l'échelle but = 10 (÷ 15) : rapides vers la balle, frappes fortes,
+  # sauter n'est pas puni (in_air), boost ramassé et gardé, but / balle → but / démos en zéro-somme.
+  zero_sum: 1.0
+  zero_sum_terms: [goal, vel_ball_to_goal, demo, bump]
+  team_spirit: {start: 0.0, end: 0.0, steps: 1}
+  anneal: null                     # aucune décroissance programmée en steps : c'est le curriculum qui décide
+  vel_player_to_ball_signed: true
+  touch_aerial_bonus: 0.0
+  flip_speed_min_speed: 300.0
+  weights:
+    goal: 10.0
+    strong_touch: 4.0              # |Δv balle| : 0 sous 20 km/h, plein à 100 km/h
+    touch: 0.5                     # amorce : n'importe quelle touche (retirée au palier 2)
+    vel_player_to_ball: 0.27
+    face_ball: 0.017
+    in_air: 0.017
+    vel_ball_to_goal: 0.13
+    boost_gain: 0.67
+    boost_keep: 0.013
+    demo: 5.3
+    bump: 1.3
+    # garde-fou (validation du 23/10 : sans lui, flips 25 → 2/min en 15 M, pente de la lignée s6) : paie tout de suite
+    # un flip qui fait gagner de la vitesse vers la balle, boost déduit (s7e : flips 0,4 → 3,3/min en 30 M).
+    # Seuil abaissé à 300 uu/s (flip_speed_min_speed) : au seuil de 1 000 de s7e, il ne payait rien avant 15 M, et
+    # une fois les sauts réprimés, la séquence saut → relâcher → flip n'est plus jamais tirée au hasard
+    flip_speed: 0.5
+    double_commit: 0.0
+curriculum:
+  ema: 0.05
+  patience: 20
+  blend_steps: 10_000_000
+  stages:
+    - name: bases                  # aller vite à la balle, la frapper fort, sauter / flipper sans crainte
+      advance: {touches_per_min: 15, mech/flips_per_min: 3, mech/avg_speed: 1250}
+      min_steps: 30_000_000
+    - name: jeu                    # sans les aides d'amorce : marquer, défendre, gérer le boost
+      rewards: {touch: 0.0, face_ball: 0.005, in_air: 0.008, vel_player_to_ball: 0.15, vel_ball_to_goal: 0.2,
+                flip_speed: 0.3}
+      advance: {ladder/gap/s6_spo_kaggle: 50}   # dernière version ≥ s6 + 50 Elo (≈ 57 % des points)
+      min_steps: 40_000_000
+    - name: avance                 # aériennes et kickoffs, seulement quand s6 est battu
+      rewards: {aerial_touch: 1.0, kickoff_win: 1.0}
+      ppo: {lr_actor: 1.0e-4, lr_critic: 1.0e-4}
+selfplay:
+  hist_prob: 0.2
+  pool_every_steps: 5_000_000
+  pool_recent: 20
+  pfsp: false
+  ladder: true                     # selfplay/ladder.py
+  anchors: [runs/s6_spo_kaggle]    # meilleur ancien agent, comme repère fixe
+  anchor_prob: 0.15                # 3 % des épisodes
