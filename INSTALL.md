@@ -1,4 +1,4 @@
-# 🛠️ Installation
+# Installation
 
 Deux machines :
 - **Portable** : développement, tests et premiers runs.
@@ -63,7 +63,7 @@ Inclut un mini-entraînement complet sur un **moteur factice** : toute la chaîn
 
 ---
 
-## 4. Collision meshes ⚠️ obligatoire pour RocketSim
+## 4. Collision meshes (obligatoire pour RocketSim)
 
 Sans eux, RocketSim **ferme le processus** à la création de l'arène. Ils viennent de TON jeu :
 
@@ -148,7 +148,8 @@ Voir [`cloud/README.md`](cloud/README.md) : `python scripts/make_cloud_bundle.py
 
 ```
 rl-agent/
-├── README.md  INSTALL.md  ARCHITECTURE.md  SPRINT_1.md
+├── README.md  INSTALL.md
+├── docs/               ARCHITECTURE, SPRINT_1, REWARDS_S7, REFONTE_S10
 ├── pyproject.toml  requirements.txt
 ├── configs/            default.yaml + profils machine (laptop, laptop_xpu, bigpc, debug) et de run (laptop_s2, laptop_s3)
 ├── src/rlagent/

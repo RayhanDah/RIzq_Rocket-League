@@ -1,4 +1,4 @@
-# 🧠 Architecture technique
+# Architecture technique
 
 Ce document fixe la conception. Toute modification passe par le PO.
 

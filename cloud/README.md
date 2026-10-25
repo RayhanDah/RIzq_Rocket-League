@@ -1,4 +1,4 @@
-# ☁️ Entraîner sur Kaggle (GPU ou TPU) ou Google Colab (gratuit)
+# Entraîner sur Kaggle (GPU ou TPU) ou Google Colab (gratuit)
 
 Le portable reste libre pendant que Kaggle (ou Colab) entraîne l'agent. Même code, mêmes réglages d'apprentissage ;
 seule l'infra change (profils `configs/kaggle.yaml`, `configs/kaggle_tpu.yaml`, `configs/colab.yaml`, plus le profil

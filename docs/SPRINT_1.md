@@ -1,4 +1,4 @@
-# 🏁 Sprint 1 — Pipeline de bout en bout
+# Sprint 1 — Pipeline de bout en bout
 
 **Dates proposées** : lundi 12 → dimanche 25 octobre 2026 (2 semaines)
 **Objectif du sprint** : *un premier bot entraîné par notre PPO/SPO, qui marque dans un but vide en simulation et joue un match dans le vrai jeu via RLBot.*
@@ -9,9 +9,9 @@
 
 ---
 
-## 📋 Backlog
+## Backlog
 
-### 🔧 Installation & outillage
+### Installation & outillage
 
 | # | Tâche | Resp. | Critère d'acceptation | Est. |
 |---|---|---|---|---|
@@ -21,7 +21,7 @@
 | S1-04 | Créer l'équipe W&B + logging de base | B | une run test apparaît dans W&B avec les métriques | 0,5 j |
 | S1-05 | Extraire et partager les **collision meshes** (si RocketSim les demande) | A | env créé sans erreur sur les 2 machines | 0,5 j |
 
-### 🔍 RocketSim (verdict : opérationnel tel quel pour le soccar, on ne le modifie pas)
+### RocketSim (verdict : opérationnel tel quel pour le soccar, on ne le modifie pas)
 
 | # | Tâche | Resp. | Critère d'acceptation | Est. |
 |---|---|---|---|---|
@@ -29,7 +29,7 @@
 | S1-07 | **Test de cohérence simulation / vrai jeu** : même état initial (kickoff + quelques tirs) dans RocketSim et dans le vrai jeu via RLBot, comparaison des trajectoires sur 1 à 2 s | A | écart documenté dans `docs/sim_vs_game.md` | 1 j |
 | S1-08 | Si un **vrai** écart gênant apparaît : le documenter, le PO décide (correctif ou contournement) | PO | décision notée | — |
 
-### 🌍 Environnement
+### Environnement
 
 | # | Tâche | Resp. | Critère d'acceptation | Est. |
 |---|---|---|---|---|
@@ -39,7 +39,7 @@
 | S1-12 | **États de départ** : kickoff + position aléatoire | A | visualisés dans RLViser | 0,5 j |
 | S1-13 | **Rewards v1** : but, touche, vitesse vers la balle, balle vers le but, boost + **esprit d'équipe (τ)** | A | chaque reward a un test unitaire, poids dans un YAML | 1,5 j |
 
-### 🧠 Algorithme
+### Algorithme
 
 | # | Tâche | Resp. | Critère d'acceptation | Est. |
 |---|---|---|---|---|
@@ -49,13 +49,13 @@
 | S1-17 | **Checkpoints** + reprise d'entraînement | B | un run arrêté reprend sans perte | 0,5 j |
 | S1-18 | Métriques de jeu + **métriques d'équipe** (double commit, collisions coéquipiers, distance) | A+B | visibles dans W&B | 1 j |
 
-### 🎮 Vrai jeu
+### Vrai jeu
 
 | # | Tâche | Resp. | Critère d'acceptation | Est. |
 |---|---|---|---|---|
 | S1-19 | **Export vers RLBot v5** via `rlgym-rlbot` (même code d'obs/actions qu'à l'entraînement) | B | notre bot joue un match complet contre Psyonix Rookie dans le vrai jeu | 1 j |
 
-### 🧪 Validation
+### Validation
 
 | # | Tâche | Resp. | Critère d'acceptation | Est. |
 |---|---|---|---|---|
@@ -64,7 +64,7 @@
 
 ---
 
-## ✅ Definition of Done (sprint)
+## Definition of Done (sprint)
 
 - [ ] Installation reproductible sur les 2 machines (`requirements.txt` figé) — portable ✅, gros PC ⏳
 - [x] Un seul modèle tourne en 1v1, 2v2 et 3v3
@@ -75,11 +75,11 @@
 - [ ] Collision meshes en place et test de cohérence simulation / vrai jeu documenté
 - [x] Tests unitaires verts (`pytest`) — 38 tests
 
-## 🔜 Aperçu du sprint 2
+## Aperçu du sprint 2
 
 Prédiction de trajectoire de balle dans les observations, états de départ avancés (air, mur, défense), entraînement aux kickoffs, pool de self-play avec Elo, premiers runs longs sur le gros PC.
 
-## ❓ À trancher par le PO avant/pendant le sprint
+## À trancher par le PO avant/pendant le sprint
 
 - [ ] Confirmer la répartition des rôles (A / B)
 - [ ] Format exact du match final et date de la démo
@@ -87,7 +87,7 @@ Prédiction de trajectoire de balle dans les observations, états de départ ava
 
 ---
 
-## 📍 Avancement au 12/10/2026 (validé sur le portable)
+## Avancement au 12/10/2026 (validé sur le portable)
 
 | # | État | Remarque |
 |---|---|---|
@@ -107,7 +107,7 @@ Prédiction de trajectoire de balle dans les observations, états de départ ava
 | S1-21 | ✅ portable | Débits dans le README ; gros PC à mesurer |
 | bonus | ✅ | Pool + Elo, moteur factice, collecte multi-arènes, apprentissage sans jetons masqués, profil `laptop_s2` |
 
-## 📍 Avancement au 16/10/2026 (revue de stratégie)
+## Avancement au 16/10/2026 (revue de stratégie)
 
 | Sujet | Résultat |
 |---|---|
