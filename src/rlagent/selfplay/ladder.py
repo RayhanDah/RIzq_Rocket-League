@@ -127,4 +127,15 @@ class Ladder:
                 out[f"ladder/anchor/{name}"] = self.ratings[pid]
                 if latest is not None:
                     out[f"ladder/gap/{name}"] = latest - self.ratings[pid]
+        best = self.best_version()
+        if best is not None and latest is not None:
+            out["ladder/best_elo"] = self.ratings[best]
+            out["ladder/best_step"] = float(self.players[best])
+            out["ladder/drop"] = self.ratings[best] - latest      # > 0 : la dernière version est sous la meilleure
         return out
+
+    def best_version(self) -> Optional[str]:
+        """Version figée la mieux notée (garde-fou contre le surentraînement : train.py la copie dans
+        <run>/best_actor.pt, au format du pool, jouable par evaluate.py / watch.py / le bot)."""
+        rated = [v for v in self._versions() if v in self.ratings]
+        return max(rated, key=lambda v: self.ratings[v]) if rated else None

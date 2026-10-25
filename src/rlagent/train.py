@@ -13,6 +13,7 @@ import argparse
 import math
 import os
 import random
+import shutil
 import signal
 import sys
 import time
@@ -293,6 +294,22 @@ def _hist_score(e: Dict[str, Any]) -> float:
 
 
 # --------------------------------------------------------------------------- main
+def save_best_version(run_dir: Path, ladder: Ladder) -> Optional[str]:
+    """Garde-fou contre le surentraînement : la version du pool la mieux notée sur l'échelle Elo est copiée dans
+    <run>/best_actor.pt (format du pool : evaluate.py, watch.py, le bot) dès qu'elle change. Renvoie son id."""
+    best = ladder.best_version()
+    marker = run_dir / "best_actor.txt"
+    if best is None or (marker.exists() and marker.read_text(encoding="utf-8").strip() == best):
+        return best
+    src = run_dir / "pool" / f"{best}.pt"
+    if src.exists():
+        tmp = run_dir / "best_actor.tmp"
+        shutil.copyfile(src, tmp)
+        tmp.replace(run_dir / "best_actor.pt")
+        marker.write_text(best, encoding="utf-8")
+    return best
+
+
 def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None) -> None:
     seed = int(cfg["seed"])
     random.seed(seed)
@@ -536,6 +553,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             if ladder is not None:
                 ladder.record(hist_results, anchors=anchor_ids)
                 ladder.fit()
+                save_best_version(run_dir, ladder)
 
             metrics = {
                 "global_step": global_step, "iteration": iteration, "elo": elo,

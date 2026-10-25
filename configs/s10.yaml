@@ -54,6 +54,7 @@ rewards:
   vel_player_to_ball_signed: true
   touch_aerial_bonus: 0.0
   flip_speed_min_speed: 300.0
+  aerial_min_z: 500.0              # aerial_touch : balle au-dessus de 500 uu (220 avant : une touche en sautant suffisait)
   weights:
     goal: 10.0
     strong_touch: 4.0              # |Δv balle| : 0 sous 20 km/h, plein à 100 km/h
@@ -75,7 +76,7 @@ rewards:
 curriculum:
   ema: 0.05
   patience: 20
-  blend_steps: 10_000_000
+  blend_steps: 100_000_000         # ~17 min sur le TPU (100 k steps/s) : 10 M y passait en 2 min
   stages:
     - name: bases                  # aller vite à la balle, la frapper fort, sauter / flipper sans crainte
       advance: {touches_per_min: 15, mech/flips_per_min: 3, mech/avg_speed: 1250}
@@ -88,6 +89,14 @@ curriculum:
     - name: avance                 # aériennes et kickoffs, seulement quand s6 est battu
       rewards: {aerial_touch: 1.0, kickoff_win: 1.0}
       ppo: {lr_actor: 1.0e-4, lr_critic: 1.0e-4}
+      advance: {ladder/gap/s6_spo_kaggle: 150}  # 1re session TPU : +230 à 2,9 G steps → passage au palier 4
+    # Palier 4 (25/10, après la 1re session TPU, 2,9 G steps) : en fin de palier 3, 62 % du signal payait « aller vite à
+    # la balle et frapper fort » dans n'importe quelle direction (vel_player_to_ball 45 %, strong_touch 17 %), contre
+    # 26 % pour le but (vel_ball_to_goal 17 %, goal 9 %) : 30 touches/min dont 6 % de tirs, kickoffs 0,1 % du signal,
+    # « aériennes » payées dès 220 uu (de simples touches en sautant). Mêmes termes, autre dosage : viser le but.
+    - name: precision
+      rewards: {vel_player_to_ball: 0.06, strong_touch: 1.5, shot: 5.0, vel_ball_to_goal: 0.35, kickoff_win: 3.0,
+                aerial_touch: 2.0, air_approach: 0.05}
 selfplay:
   hist_prob: 0.2
   pool_every_steps: 5_000_000

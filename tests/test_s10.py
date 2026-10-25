@@ -290,3 +290,35 @@ def test_shell_scripts_have_lf_line_endings():
     root = Path(__file__).resolve().parents[1]
     for sh in list((root / "cloud").glob("*.sh")) + list((root / "scripts").glob("*.sh")):
         assert b"\r\n" not in sh.read_bytes(), sh.name
+
+
+def test_precision_stage_rebalances_toward_goal():
+    """Palier 4 (25/10) : moins de « vite à la balle, frapper fort », plus de tirs cadrés, kickoffs et vraies aériennes."""
+    from rlagent.env.rewards import AerialTouchTerm
+    cfg = load_config(["kaggle_tpu", "s10"])
+    c = SkillCurriculum.from_cfg(cfg)
+    assert c.names == ["bases", "jeu", "avance", "precision"]
+    w3, w4 = c.stage_weights[2], c.stage_weights[3]
+    assert w4["vel_player_to_ball"] < w3["vel_player_to_ball"] and w4["strong_touch"] < w3["strong_touch"]
+    assert w4["shot"] > 0 and w4["vel_ball_to_goal"] > w3["vel_ball_to_goal"] and w4["kickoff_win"] > w3["kickoff_win"]
+    assert c.stages[2]["advance"] and c.ppo_overrides() == {}
+    rf = make_reward(cfg)
+    assert {"shot", "air_approach"} <= {t.name for t in rf.terms}
+    assert next(t for t in rf.terms if isinstance(t, AerialTouchTerm)).min_z == 500.0
+
+
+def test_best_version_is_saved_and_follows_the_ladder(tmp_path):
+    from rlagent.train import save_best_version
+    (tmp_path / "pool").mkdir()
+    lad = Ladder(tmp_path / "ladder.json")
+    lad.add_version("actor_0", 0)
+    for k, wins in ((1, 9), (2, 4)):          # v1 bat largement v0 ; v2 perd contre v1
+        (tmp_path / "pool" / f"actor_{k}.pt").write_bytes(bytes([k]))
+        opp = f"actor_{k - 1}"
+        lad.record([(opp, 1.0)] * wins + [(opp, 0.0)] * (10 - wins))
+        lad.add_version(f"actor_{k}", k)
+    lad.fit()
+    assert save_best_version(tmp_path, lad) == "actor_1"
+    assert (tmp_path / "best_actor.pt").read_bytes() == bytes([1])
+    m = lad.metrics()
+    assert m["ladder/best_step"] == 1.0 and m["ladder/drop"] > 0

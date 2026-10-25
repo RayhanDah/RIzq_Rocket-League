@@ -182,3 +182,74 @@ Depuis `rl-agent` (PowerShell), avec le quota GPU disponible :
 | `ladder/gap/s6_spo_kaggle` | négatif au début, vers 0 puis positif | c'est le critère du passage au palier 3 (+50) |
 | `curriculum/stage` | 0 → 1 quand les bases sont là (≥ 30 M) | rester à 0 n'est pas une panne : un critère n'est pas atteint (`curriculum/ema/*`) |
 | `learn/kl_final` | 0,002-0,01 | |
+
+## 7. Résultat de la 1re session Kaggle (TPU v5e-8, 23-24/10/2026)
+
+Rapatrié le 25/10 (le rapatriement automatique s'était arrêté avec le PC). Copie complète : `runs/s10_ppo_kaggle`
+(sinon `dist/kaggle/output/s10_ppo_kaggle`).
+
+**Débit** : la VM TPU a **224 vCPU** ; l'autoréglage a choisi 168 workers × 8 arènes en collecte locale et
+l'apprentissage sur TPU (0,4 s par lot de 100 k, contre 4 s sur CPU). **~100 000 steps/s pendant 8 h = 2,91 milliards
+de steps**, 15× le portable, 17× Kaggle GPU. Sans réécrire une ligne : la file d'attente est le seul prix.
+
+| Step | touches/min | flips/min | sauts/min | touches aériennes/min | vitesse | supersonique | `ladder/elo` | écart avec s6 | victoires / défaites contre s6 | palier |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 20 M | 18,4 | 6,1 | 7,4 | 0,1 | 1 180 | 3 % | 33 | −439 | 8 % / 84 % | bases |
+| 100 M | 27,1 | **1,9** | 2,3 | 0,2 | 1 130 | 3 % | 128 | −269 | 4 % / 80 % | bases |
+| 300 M | 45,5 | 4,4 | 4,6 | 0,3 | 1 210 | 4 % | 214 | −169 | 26 % / 68 % | bases |
+| 500 M | 47,7 | 5,2 | 5,1 | 0,2 | 1 250 | 5 % | 287 | −92 | 37 % / 55 % | jeu (453 M) |
+| 1 000 M | 29,8 | 15,2 | 15,9 | 2,4 | 1 400 | 10 % | 499 | +121 | 55 % / 42 % | avancé (775 M) |
+| 2 000 M | 30,2 | 16,9 | 18,4 | 4,8 | 1 500 | 14 % | 612 | +234 | 73 % / 23 % | avancé |
+| 2 910 M | 30,6 | **17,4** | 19,9 | **6,8** | 1 550 | 16 % | 608 | +230 | 77 % / 20 % | avancé |
+
+**Match de contrôle** (`scripts/evaluate.py`, 40 matchs 1v1 de 5 min, version finale contre s6) : **38 victoires,
+1 défaite, 1 nul, buts 142 à 25**. s10 est de loin notre meilleur agent.
+
+Ce qu'on en tire :
+- **la recette marche et le curriculum a fait son travail seul** : palier 2 à 453 M (bases acquises), palier 3 à
+  775 M (s6 dépassé de 50 Elo), puis aériennes et kickoffs ;
+- **les flips ont encore plongé (1,9/min à 100 M) puis sont remontés** quand le jeu l'a demandé (17/min à la fin) ;
+  le garde-fou `flip_speed` a tenu jusque-là. Touches aériennes 0,1 → 6,8/min, vitesse 1 180 → 1 550 uu/s ;
+- l'échelle Elo est montée de façon continue jusqu'à ~1,9 G steps (version la meilleure : 638 à 1 915 M), puis
+  **plateau depuis ~2 G** (591 → 614 → 608). Kickoffs gagnés ~50 % (pas de progrès), démos quasi absentes.
+
+**Suite proposée** (à décider) : session suivante = reprise du même run (même commande, `--accelerator tpu`), avec
+au choix un lot plus gros (800 k-1 M, le gradient reste bruité), un lr qui baisse encore, un exercice de kickoff, et
+des adversaires plus variés (PFSP) pour sortir du plateau.
+
+## 8. Session 2 sur TPU : palier 4 « précision » (25/10/2026)
+
+Ce que le PO voit en match (RLViser) : il vise mal le but, kickoffs moyens, touches en l'air seulement en sautant, il
+cherche la touche plus que le but. Les métriques de fin de palier 3 (> 2,5 G steps) le confirment :
+
+| Part du signal d'apprentissage | |
+|---|---|
+| `vel_player_to_ball` (aller vite à la balle) | **44,6 %** |
+| `strong_touch` (frapper fort, n'importe où) | **17,4 %** |
+| `vel_ball_to_goal` (balle vers le but adverse) | 16,7 % |
+| `goal` | 9,0 % |
+| `aerial_touch` / `kickoff_win` | 1,4 % / **0,1 %** |
+
+30 touches/min, dont **6 % de tirs** (45 % des tirs marquent). `aerial_touch` payait dès 220 uu de hauteur : de simples
+touches en sautant. Correction **sans toucher à la structure** : un palier de plus dans le curriculum, mêmes termes
+(tous déjà testés), autre dosage, transition progressive sur 100 M steps :
+
+| Poids | palier 3 | **palier 4** |
+|---|---|---|
+| `vel_player_to_ball` | 0,15 | 0,06 |
+| `strong_touch` | 4,0 | 1,5 |
+| `shot` (gain de vitesse de la balle **dans l'axe du but adverse**, négatif vers notre but) | 0 | 5,0 |
+| `vel_ball_to_goal` | 0,2 | 0,35 |
+| `kickoff_win` | 1,0 | 3,0 |
+| `aerial_touch` (au-dessus de **500 uu** au lieu de 220) | 1,0 | 2,0 |
+| `air_approach` (en l'air, balle haute : vitesse vers la balle) | 0 | 0,05 |
+
+Passage au palier 4 quand l'écart avec s6 dépasse +150 Elo (+230 à la fin de la session 1 : passage dès la reprise).
+
+**Garde-fou contre le surentraînement** : à chaque itération, la version du pool la mieux notée sur l'échelle Elo est
+copiée dans `runs/s10_ppo_kaggle/best_actor.pt` (jouable par `evaluate.py`, `watch.py` et le bot). Nouvelles
+métriques `ladder/best_elo`, `ladder/best_step` et `ladder/drop` (meilleure − dernière : > 50 de façon durable =
+régression). Quoi qu'il arrive, on garde la meilleure version, pas la dernière.
+
+À regarder au retour : `shots_per_min` / `touches_per_min` (6 % au départ), `goals_per_min`,
+`vs_hist/kickoff_win_rate` (~50 %), `aerial_touches_per_min` au-dessus de 500 uu, `ladder/drop`.
