@@ -305,6 +305,26 @@ def count_lines(path: Path) -> int:
         return sum(1 for _ in f)
 
 
+def download_output(k, ref: str, dest: Path, file_pattern=None, attempts: int = 6, pause: float = 30.0) -> list:
+    """Output d'une session, avec reprise après une coupure réseau (25/10 : `IncompleteRead` au milieu des ~2 Go du
+    pool de s10 → rien copié). Après une coupure, le fichier le plus récent (celui en cours, tronqué) est supprimé et
+    on reprend sans retélécharger les fichiers déjà complets."""
+    for attempt in range(1, attempts + 1):
+        try:
+            files, _ = k.kernels_output(ref, str(dest), file_pattern=file_pattern, force=attempt == 1)
+            return files
+        except Exception as err:  # noqa: BLE001 — requests / urllib3 : ChunkedEncodingError, ConnectionError…
+            if attempt == attempts:
+                raise
+            partial = max((p for p in dest.rglob("*") if p.is_file()), key=lambda p: p.stat().st_mtime, default=None)
+            if partial is not None:
+                partial.unlink()
+            print(f"[kaggle] téléchargement coupé ({type(err).__name__}), essai {attempt + 1}/{attempts} dans "
+                  f"{pause:.0f} s (fichier tronqué retiré : {partial.name if partial else '-'})", flush=True)
+            time.sleep(pause)
+    return []
+
+
 def cmd_fetch(args) -> None:
     k = api()
     _, ref = kernel_ref(k, args.run_name)
@@ -333,11 +353,11 @@ def cmd_fetch(args) -> None:
     dest = WORK / "output" / args.run_name
     shutil.rmtree(dest, ignore_errors=True)
     pattern = rf"^runs/{re.escape(args.run_name)}(/|\.log$)"
-    files, _ = k.kernels_output(ref, str(dest), file_pattern=pattern, force=True)
+    files = download_output(k, ref, dest, file_pattern=pattern)
     found = sorted(dest.rglob(f"runs/{args.run_name}/latest.txt"))
     if not found:
         print("[kaggle] rien sous runs/<run> avec le filtre : téléchargement de tout l'Output")
-        files, _ = k.kernels_output(ref, str(dest), force=True)
+        files = download_output(k, ref, dest)
         found = sorted(dest.rglob(f"{args.run_name}/latest.txt"))
     print(f"[kaggle] {len(files)} fichiers téléchargés dans {dest}")
     if not found:

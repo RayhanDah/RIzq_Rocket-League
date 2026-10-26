@@ -322,3 +322,31 @@ def test_best_version_is_saved_and_follows_the_ladder(tmp_path):
     assert (tmp_path / "best_actor.pt").read_bytes() == bytes([1])
     m = lad.metrics()
     assert m["ladder/best_step"] == 1.0 and m["ladder/drop"] > 0
+
+
+def test_kaggle_output_download_resumes_after_network_cut(tmp_path, monkeypatch):
+    """25/10 : une coupure au milieu des ~2 Go du pool faisait tout perdre. Reprise : le fichier tronqué est retiré,
+    les fichiers complets ne sont pas retéléchargés (force=False après le 1er essai)."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cloud"))
+    import kaggle_sync
+    monkeypatch.setattr(kaggle_sync.time, "sleep", lambda s: None)
+    calls = []
+
+    class FakeApi:
+        def kernels_output(self, ref, dest, file_pattern=None, force=False):
+            calls.append(force)
+            d = Path(dest)
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "a.pt").write_bytes(b"complet")
+            if len(calls) == 1:
+                (d / "b.pt").write_bytes(b"tron")
+                raise ConnectionError("IncompleteRead")
+            assert not (d / "b.pt").exists()          # fichier tronqué retiré avant la reprise
+            (d / "b.pt").write_bytes(b"complet")
+            return [str(d / "a.pt"), str(d / "b.pt")], None
+
+    files = kaggle_sync.download_output(FakeApi(), "u/k", tmp_path / "out")
+    assert calls == [True, False] and len(files) == 2
+    assert (tmp_path / "out" / "b.pt").read_bytes() == b"complet"
