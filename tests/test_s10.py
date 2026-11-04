@@ -20,7 +20,8 @@ def test_s10_effective_config(infra):
     cfg = load_config(infra + ["s10"])
     e, r = cfg["env"], cfg["rewards"]
     assert {k: v for k, v in e["format_weights"].items() if v > 0} == {1: 1.0}
-    assert {k: v for k, v in e["start_weights"].items() if v > 0} == {"kickoff": 0.5, "random": 0.5}
+    assert {k: v for k, v in e["start_weights"].items() if v > 0} == {"kickoff": 0.4, "random": 0.3, "drill_aerial": 0.2,
+                                                                      "drill_shot": 0.1}
     assert not e.get("adaptive_drills") and (e["ball_prediction"], e["race_features"], e["boost_features"]) == (
         True, False, False)
     assert r["anneal"] is None and r["team_spirit"]["end"] == 0.0
@@ -256,7 +257,7 @@ def test_s10_profile_trains_end_to_end_with_ladder_and_curriculum(tmp_path):
     cfg["model"].update(actor_hidden=[64, 64], critic_hidden=[64, 64])
     cfg["ppo"].update(batch_steps=2000, minibatch_size=1000, device_chunk=1000, batch_schedule=None)
     cfg["train"].update(n_workers=2, total_steps=8000, checkpoint_every_steps=4000)
-    cfg["selfplay"].update(pool_every_steps=2000, hist_prob=0.5, anchors=[])
+    cfg["selfplay"].update(pool_every_steps=2000, hist_prob=0.5, anchors=[], ladder_fit_every=2)
     # palier 1 franchi tout de suite : on vérifie le passage au palier 2 et l'envoi des poids aux workers
     cfg["curriculum"]["stages"][0].update(advance={"touches_per_min": -1.0}, min_steps=0)
     cfg["curriculum"]["patience"] = 1
@@ -297,7 +298,7 @@ def test_precision_stage_rebalances_toward_goal():
     from rlagent.env.rewards import AerialTouchTerm
     cfg = load_config(["kaggle_tpu", "s10"])
     c = SkillCurriculum.from_cfg(cfg)
-    assert c.names == ["bases", "jeu", "avance", "precision"]
+    assert c.names[:4] == ["bases", "jeu", "avance", "precision"]
     w3, w4 = c.stage_weights[2], c.stage_weights[3]
     assert w4["vel_player_to_ball"] < w3["vel_player_to_ball"] and w4["strong_touch"] < w3["strong_touch"]
     assert w4["shot"] > 0 and w4["vel_ball_to_goal"] > w3["vel_ball_to_goal"] and w4["kickoff_win"] > w3["kickoff_win"]

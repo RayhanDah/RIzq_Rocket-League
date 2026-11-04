@@ -25,7 +25,7 @@ from rlgym.rocket_league import common_values as cv
 from rlgym.rocket_league.api import GameState
 
 from .common import OPP_GOAL_BACK, OWN_GOAL_BACK, norm3
-from .predict import ETA_CAP, race_info, team_etas
+from .predict import ETA_CAP, goal_threat, race_info, team_etas
 
 
 def _dot_dir(v, a, b) -> float:
@@ -191,10 +191,13 @@ class TouchStrengthTerm(RewardTerm):
 class ShotTerm(RewardTerm):
     """Frappe orientée vers le but adverse : à chaque touche, variation de la vitesse de la balle DANS L'AXE du but
     adverse (normalisée par sa vitesse max). Négative si la touche renvoie la balle vers notre but.
-    Contrairement à `touch_strength`, une frappe forte vers les côtés ou vers notre camp ne rapporte rien."""
+    Contrairement à `touch_strength`, une frappe forte vers les côtés ou vers notre camp ne rapporte rien.
+    `off_target_factor` (palier 5) : dans le camp adverse, une frappe qui ne cadre pas ne touche que cette part du gain.
+    Un dégagement depuis notre camp reste payé en entier : ce n'est pas un tir."""
     name = "shot"
 
-    def __init__(self):
+    def __init__(self, off_target_factor: float = 1.0):
+        self.off_target_factor = float(off_target_factor)
         self.prev_ball_vel = np.zeros(3, dtype=np.float32)
 
     def reset(self, agents, state, shared_info):
@@ -204,7 +207,7 @@ class ShotTerm(RewardTerm):
         vel = np.asarray(state.ball.linear_velocity, dtype=np.float32)
         dv = (vel - self.prev_ball_vel).tolist()
         self.prev_ball_vel = vel.copy()
-        ball = state.ball.position.tolist()
+        ball, ball_vel = state.ball.position.tolist(), vel.tolist()
         out = {}
         for a in agents:
             car = state.cars[a]
@@ -213,7 +216,12 @@ class ShotTerm(RewardTerm):
                 continue
             # axe balle → but adverse, dans le repère du monde (inversé pour l'orange)
             goal = _OPP_GOAL if car.team_num == cv.BLUE_TEAM else _OPP_GOAL_ORANGE
-            out[a] = _dot_dir(dv, ball, goal) / cv.BALL_MAX_SPEED
+            r = _dot_dir(dv, ball, goal) / cv.BALL_MAX_SPEED
+            sign = _team_sign(car.team_num)
+            if (r > 0.0 and self.off_target_factor != 1.0 and ball[1] * sign > 0.0
+                    and goal_threat(ball, ball_vel, sign) == 0.0):
+                r *= self.off_target_factor
+            out[a] = r
         return out
 
 
@@ -380,6 +388,30 @@ class ThreatPotential(PotentialTerm):
         return out
 
 
+class ShotThreatPotential(PotentialTerm):
+    """Φ = valeur d'une balle cadrée vers le but adverse − valeur d'une balle cadrée vers NOTRE but (palier 5).
+    Valeur = 0 hors cadre, sinon `floor` + (1 − floor) × urgence (predict.goal_threat, balle seule : pas d'ETA, peu
+    coûteux). Le saut à `floor` donne un signal net au moment où la balle devient cadrée :
+      - tir cadré : payé tout de suite, à qui l'a frappé ;
+      - balle cadrée déviée par son propre tireur : la même somme, retirée tout de suite ;
+      - arrêt : payé au défenseur, repris au tireur.
+    Potentiel : la somme sur un épisode se télescope, il ne se farme pas. Antisymétrique : pas de soustraction adverse."""
+    name = "shot_threat"
+
+    def __init__(self, gamma: float = 0.99, floor: float = 0.5):
+        super().__init__(gamma)
+        self.floor = float(floor)
+
+    def _value(self, pos, vel, goal_sign: float) -> float:
+        g = goal_threat(pos, vel, goal_sign)
+        return 0.0 if g <= 0.0 else self.floor + (1.0 - self.floor) * g
+
+    def potentials(self, agents, state, shared_info):
+        pos, vel = state.ball.position.tolist(), state.ball.linear_velocity.tolist()
+        blue = self._value(pos, vel, 1.0) - self._value(pos, vel, -1.0)
+        return {a: blue * _team_sign(state.cars[a].team_num) for a in agents}
+
+
 class BoostPotential(PotentialTerm):
     """Φ = √(boost/100) par voiture : ramasser rapporte tout de suite (surtout à sec), dépenser coûte tout de suite ;
     le boost n'est rentable que s'il sert (touche, tir, arrêt, course gagnée). Remplace `boost_keep` (qui payait le
@@ -439,22 +471,32 @@ class AerialTouchTerm(RewardTerm):
     """Touche AÉRIENNE (voiture en l'air, balle au-dessus de `min_z`) : 0,5 au ras du sol → 2 vers le plafond, ×1,5 puis
     ×2 pour les touches aériennes suivantes sans retomber (double touche, air dribble). Les touches au mur ne comptent
     pas (roues au contact). Au plus une touche payée par `cooldown_s` et par voiture : un contact prolongé (balle posée
-    sur le capot) ne se farme pas step après step. Événement de compétence : ne décroît pas (identité de l'agent)."""
+    sur le capot) ne se farme pas step après step. Événement de compétence : ne décroît pas (identité de l'agent).
+    `min_air_boost_s` (palier 5) : boost exigé en l'air depuis le décollage. Sans lui, 86 % des touches payées venaient
+    d'un saut depuis un mur, sans boost (audit du 04/11)."""
     name = "aerial_touch"
 
-    def __init__(self, min_z: float = 220.0, full_z: float = 1720.0, cooldown_s: float = 0.5):
+    def __init__(self, min_z: float = 220.0, full_z: float = 1720.0, cooldown_s: float = 0.5,
+                 min_air_boost_s: float = 0.0):
         self.min_z, self.full_z = float(min_z), float(full_z)
         self.cooldown = int(round(cooldown_s * cv.TICKS_PER_SECOND))
+        self.min_air_boost = float(min_air_boost_s) * cv.TICKS_PER_SECOND
         self.chain: Dict[str, int] = {}
         self.last_tick: Dict[str, int] = {}
+        self.air_boost: Dict[str, int] = {}               # ticks de boost depuis le décollage
+        self.prev_tick = 0
 
     def reset(self, agents, state, shared_info):
         self.chain = {a: 0 for a in agents}
         self.last_tick = {}
+        self.air_boost = {a: 0 for a in agents}
+        self.prev_tick = int(getattr(state, "tick_count", 0) or 0)
 
     def get(self, agents, state, shared_info):
         z = float(state.ball.position[2])
         tick = int(getattr(state, "tick_count", 0) or 0)
+        dt_ticks = max(0, tick - self.prev_tick)
+        self.prev_tick = tick
         height = min(1.0, max(0.0, (z - self.min_z) / (self.full_z - self.min_z)))
         out = {}
         for a in agents:
@@ -462,8 +504,11 @@ class AerialTouchTerm(RewardTerm):
             out[a] = 0.0
             if car.on_ground:
                 self.chain[a] = 0
+                self.air_boost[a] = 0
                 continue
-            if car.ball_touches <= 0 or z <= self.min_z:
+            if car.is_boosting:
+                self.air_boost[a] = self.air_boost.get(a, 0) + dt_ticks
+            if car.ball_touches <= 0 or z <= self.min_z or self.air_boost.get(a, 0) < self.min_air_boost:
                 continue
             last = self.last_tick.get(a)
             if last is not None and tick - last < self.cooldown:
@@ -478,11 +523,13 @@ class AerialTouchTerm(RewardTerm):
 class AirApproachTerm(RewardTerm):
     """En l'air, balle haute (> `min_z`) : vitesse vers la balle / 2300, pour le 1er homme seulement (plus petite ETA
     de l'équipe). Apprend le contrôle aérien (boost + orientation vers la balle) ; sauter quand la balle est au sol ou
-    s'envoler à côté ne rapporte rien. Aide d'apprentissage : à faire décroître."""
+    s'envoler à côté ne rapporte rien. Aide d'apprentissage : à faire décroître.
+    `boost_only` (palier 5) : seulement en boostant, pour payer le vol et plus les sauts et flips vers une balle haute."""
     name = "air_approach"
 
-    def __init__(self, min_z: float = 300.0):
+    def __init__(self, min_z: float = 300.0, boost_only: bool = False):
         self.min_z = float(min_z)
+        self.boost_only = bool(boost_only)
 
     def get(self, agents, state, shared_info):
         ball = state.ball.position.tolist()
@@ -492,7 +539,7 @@ class AirApproachTerm(RewardTerm):
         out = {}
         for a in agents:
             car = state.cars[a]
-            if car.on_ground:
+            if car.on_ground or (self.boost_only and not car.is_boosting):
                 out[a] = 0.0
                 continue
             mine, mate, _ = team_etas(info, state, a)
@@ -845,7 +892,7 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         BoostGainTerm(loss_coef=rc.get("boost_loss_coef", 0.0), below=rc.get("boost_gain_below", 100.0)),
         DoubleCommitTerm(radius=rc.get("double_commit_radius", 900), min_speed=rc.get("double_commit_min_speed", 400)),
         TouchStrengthTerm(),
-        ShotTerm(),
+        ShotTerm(off_target_factor=rc.get("shot_off_target_factor", 1.0)),
         AlignBallGoalTerm(),
         InAirTerm(),
         BoostKeepTerm(),
@@ -858,8 +905,8 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         BoostPotential(float(rc.get("boost_potential_gamma", gamma))),
         PositioningPotential(gamma, temperature=rc.get("race_temperature", 0.3),
                              support_p=rc.get("support_defend_p", 0.8)),
-        AerialTouchTerm(min_z=rc.get("aerial_min_z", 220.0)),
-        AirApproachTerm(),
+        AerialTouchTerm(min_z=rc.get("aerial_min_z", 220.0), min_air_boost_s=rc.get("aerial_min_air_boost_s", 0.0)),
+        AirApproachTerm(boost_only=rc.get("air_approach_boost_only", False)),
         FlipSpeedTerm(min_speed=rc.get("flip_speed_min_speed", 1000.0)),
         KickoffRushTerm(),
         KickoffWinTerm(),
@@ -869,6 +916,8 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
                         max_speed=rc.get("strong_touch_max_speed", 2778.0)),
         DemoTerm(),
         BumpTerm(),
+        # palier 5 « finition » (04/11/2026)
+        ShotThreatPotential(gamma, floor=rc.get("shot_threat_floor", 0.5)),
     ]
     stages = (cfg.get("curriculum") or {}).get("stages") or []
     return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0),

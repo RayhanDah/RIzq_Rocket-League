@@ -151,13 +151,16 @@ class DrillCurriculum:
     Une moyenne glissante de réussite par exercice (sur les épisodes de TOUTES les arènes) ; à chaque itération, le
     niveau monte de `step` si elle dépasse `promote`, descend si elle passe sous `demote` (zone de progrès : ni
     trivial, ni impossible). Niveau 0 = version facile (ex. aérien : toucher une balle à 300 uu en sautant), 1 = cible
-    (aérienne vers le plafond). Envoyé aux workers (shared_info["drill_levels"]), sauvegardé avec les checkpoints."""
+    (aérienne vers le plafond). Envoyé aux workers (shared_info["drill_levels"]), sauvegardé avec les checkpoints.
+    `min_level` : plancher. Sans lui, un exercice raté redescend jusqu'à ne plus demander la compétence visée (validation
+    du 04/11 : aérien réussi à 3 %, le niveau baissait vers des balles à 200 uu, sous le seuil des rewards aériens)."""
 
     def __init__(self, kinds, start: float = 0.0, step: float = 0.01, promote: float = 0.65, demote: float = 0.35,
-                 ema: float = 0.05):
+                 ema: float = 0.05, min_level: float = 0.0):
         self.levels = {k: float(start) for k in kinds}
         self.success = {k: 0.5 for k in kinds}
         self.step, self.promote, self.demote, self.ema = float(step), float(promote), float(demote), float(ema)
+        self.min_level = float(min_level)
 
     @classmethod
     def from_cfg(cls, cfg: Dict[str, Any]) -> Optional["DrillCurriculum"]:
@@ -168,7 +171,7 @@ class DrillCurriculum:
         weights = cfg["env"]["start_weights"]
         kinds = [k for k in LEVELED_DRILLS if float(weights.get("drill_" + k, 0.0)) > 0.0]
         return cls(kinds, start=dc.get("start", 0.0), step=dc.get("step", 0.01), promote=dc.get("promote", 0.65),
-                   demote=dc.get("demote", 0.35), ema=dc.get("ema", 0.05))
+                   demote=dc.get("demote", 0.35), ema=dc.get("ema", 0.05), min_level=dc.get("min_level", 0.0))
 
     def update(self, episodes: List[Dict[str, Any]]) -> None:
         seen = set()
@@ -181,7 +184,7 @@ class DrillCurriculum:
             if self.success[k] > self.promote:
                 self.levels[k] = min(1.0, self.levels[k] + self.step)
             elif self.success[k] < self.demote:
-                self.levels[k] = max(0.0, self.levels[k] - self.step)
+                self.levels[k] = max(self.min_level, self.levels[k] - self.step)
 
     def metrics(self) -> Dict[str, float]:
         out = {f"curriculum/{k}/level": v for k, v in self.levels.items()}
@@ -221,7 +224,8 @@ def summarize_episodes(episodes: List[Dict[str, Any]]) -> Dict[str, float]:
     out["goals_per_min"] = sum(e["goal_team"] is not None for e in episodes) / max(total_min, 1e-6)
     out["touches_per_min"] = float(np.mean([e["touches_per_min"] for e in episodes]))
     out["air_touches_per_min"] = float(np.mean([e["air_touches_per_min"] for e in episodes]))
-    for key in ("aerial_touches_per_min", "shots_per_min", "saves_per_min"):
+    for key in ("aerial_touches_per_min", "shots_per_min", "saves_per_min", "off_target_per_min", "spoils_per_min",
+                "true_aerials_per_min", "wall_aerials_per_min"):
         vals = [e[key] for e in episodes if key in e]
         if vals:
             out[key] = float(np.mean(vals))
@@ -403,6 +407,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
     # Échelle Elo absolue (selfplay/ladder.py) : la version de départ (réseau aléatoire) en est l'origine (Elo 0) et
     # le premier adversaire du pool
     ladder = Ladder(run_dir / "ladder.json") if sp_cfg.get("ladder", False) else None
+    ladder_fit_every = max(1, int(sp_cfg.get("ladder_fit_every", 1)))
     anchor_ids = {a["id"]: a["name"] for a in pool.anchors}
     if ladder is not None and global_step == 0 and len(pool) == 0:
         ladder.add_version(pool.add({k: v.cpu() for k, v in actor.state_dict().items()}, cfg["model"], 0, elo), 0)
@@ -552,8 +557,9 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             pool.record_results(hist_results)  # scores glissants PFSP / ancres (sans effet si options désactivées)
             if ladder is not None:
                 ladder.record(hist_results, anchors=anchor_ids)
-                ladder.fit()
-                save_best_version(run_dir, ladder)
+                if iteration % ladder_fit_every == 0:      # coût en n² : 16 % d'une itération à 1 000 versions
+                    ladder.fit()
+                    save_best_version(run_dir, ladder)
 
             metrics = {
                 "global_step": global_step, "iteration": iteration, "elo": elo,
@@ -603,6 +609,10 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         if executor is not None:
             executor.shutdown(wait=True)
         if not poisoned["flag"] and iteration > 0:
+            if ladder is not None:
+                ladder.fit()
+                ladder.save()
+                save_best_version(run_dir, ladder)
             path = save_checkpoint(run_dir, make_state(), int(tr["keep_checkpoints"]))
             print(f"[train] checkpoint final : {path}")
         collector.close()

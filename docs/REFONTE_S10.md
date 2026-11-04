@@ -253,3 +253,87 @@ régression). Quoi qu'il arrive, on garde la meilleure version, pas la dernière
 
 À regarder au retour : `shots_per_min` / `touches_per_min` (6 % au départ), `goals_per_min`,
 `vs_hist/kickoff_win_rate` (~50 %), `aerial_touches_per_min` au-dessus de 500 uu, `ladder/drop`.
+
+## 9. Session 3 sur TPU : palier 5 « finition » (04/11/2026)
+
+Premiers matchs dans le vrai jeu (RLBot, 5,315 G en argmax, 120 FPS) : 3-1 et 5-3 contre Psyonix All-Star, 2-7 contre le
+PO. Ce que le PO voit : il cherche la touche au point de dévier sa propre balle qui rentre, il tire souvent à côté, il
+touche des balles en sautant du sol ou des murs mais sans boost. **Contrainte : garder le jeu agressif et rush de
+l'agent, qui fait partie de son identité.**
+
+`scripts/style_audit.py` (40 matchs de 5 min en RocketSim, 5,315 G en argmax contre 5,315 G échantillonné) confirme tout :
+
+| Défaut | Mesure |
+|---|---|
+| Dévie sa propre balle | 50 % de ses touches sur une balle cadrée la font sortir du cadre (0,68 / min, pour 1,13 but / min) |
+| Tire à côté | 35 % de frappes cadrées (1,85 cadrées, 3,50 hors cadre / min) |
+| Pas d'aériennes | 0,10 vraie aérienne / min, 1,22 touche depuis un mur / min, 0 but aérien ; boost sur 10 % du temps en l'air |
+| Cause cachée | moins de 10 de boost 71 % du temps (moyenne 16), 48 % du temps en l'air à flipper pour garder de la vitesse |
+
+Pourquoi le signal produisait ça :
+
+- `strong_touch` paie toute frappe forte, quelle que soit sa direction, et rien ne reprenait une balle cadrée perdue ;
+- `shot` paie la direction générale du but : une frappe à côté rapporte presque autant qu'une frappe cadrée ;
+- `aerial_touch` ne regarde pas le boost : 86 % des touches payées étaient des sauts depuis un mur ;
+- presque aucun épisode ne propose une balle haute avec du boost en réserve, et l'entropie (3,18 nats ≈ 24 actions) rend
+  impossible une aérienne, qui demande 1 à 2 s d'actions cohérentes.
+
+### Ce qui change
+
+| | Palier 4 | **Palier 5** |
+|---|---|---|
+| `shot_threat` (nouveau, potentiel : balle cadrée payée, déviation et arrêt repris) | 0 | **3,0** |
+| `strong_touch` | 1,5 | 1,0 |
+| `shot` hors cadre dans le camp adverse (`shot_off_target_factor`) | payé en entier | payé au quart |
+| `aerial_touch` (boost exigé : 0,25 s en l'air, `aerial_min_air_boost_s`) | 2,0, sans boost | **4,0**, avec boost |
+| `air_approach` (seulement en boostant, `air_approach_boost_only`) | 0,05 | 0,15 |
+| `boost_gain` | 0,67 | 1,0 |
+| `ent_coef` | 0,01 | 0,005 |
+| Départs | kickoff 50 %, aléatoire 50 % | kickoff 40 %, aléatoire 30 %, aérien 20 %, tir 10 % |
+
+**Non modifiés, pour protéger le rush** : `vel_player_to_ball`, `flip_speed`, `demo`, `bump`, `vel_ball_to_goal`, `goal`,
+`boost_keep`. Dépenser du boost reste gratuit. Mesuré avec le palier 5 sur le jeu actuel de l'agent (rejeu, puis log de la
+validation) : `vel_player_to_ball` 15 à 18 % du signal (17,9 % avant : poids inchangé, mais un terme de plus dans le
+total), `shot_threat` 10 à 14 %.
+
+`shot_threat` est un potentiel (`r = γΦ(s') − Φ(s)`) : il ne se farme pas, sa somme sur un épisode se télescope. Il
+ne punit que les touches qui font perdre une balle cadrée, pas les touches en général : la pression reste rentable.
+
+Exercices : `drill_aerial` et `drill_shot` existaient déjà (s7), leur niveau suit la réussite (`env.drill_curriculum`).
+Plancher à 0,4 : l'aérien n'est réussi qu'à 3 % au niveau 0,3, et sans plancher le niveau redescendait vers des balles à
+200 uu, sous le seuil des rewards aériens. Reprise du run : le palier 4 a maintenant un critère de sortie (écart s6 ≥ 150, +465 aujourd'hui), le passage
+se fait dès les premières itérations, avec transition sur 100 M steps.
+
+Débit : `selfplay.ladder_fit_every: 10`. L'échelle était recalculée à chaque itération, pour un surcoût de 0,8 s sur
+4,9 s à 1 000 versions, en n². Métriques ajoutées au log : `spoils_per_min`, `off_target_per_min`,
+`true_aerials_per_min`, `wall_aerials_per_min`, `mech/air_boost_frac`, `mech/ball_dist`, `mech/opp_half_frac`,
+`mech/bumps_per_min`.
+
+### Critères fixés avant la session
+
+Mêmes conditions que le tableau ci-dessus, contre le même adversaire (5,315 G échantillonné) :
+
+```bash
+.venv\Scripts\python scripts/style_audit.py --a <nouvel agent> --b <5,315 G> --det-a --games 40
+```
+
+| Objectif | Avant | Visé |
+|---|---|---|
+| Déviations (% des touches sur balle cadrée) | 50 % | < 25 % |
+| Précision des frappes | 35 % | > 45 % |
+| Vraies aériennes / min | 0,10 | > 1 |
+| Buts aériens | 0 | > 0 |
+| Boost moyen | 16 | > 25 |
+
+| Plancher rush (à ne pas franchir) | Avant | Minimum |
+|---|---|---|
+| Vitesse moyenne | 1 488 | 1 400 |
+| Supersonique | 14,5 % | 12 % |
+| Plus proche de la balle | 57 % | 52 % |
+| Frappes / min | 16,6 | 13 |
+| Contacts / min | 2,4 | 2,0 |
+
+Un agent qui atteint les objectifs mais franchit un plancher n'est pas retenu : on cherche alors, dans le pool (une version
+tous les 5 M steps), la meilleure version qui respecte les planchers. `best_actor.pt` choisit à l'Elo seul, il ne suffit
+donc pas à trancher. Les aériennes sont l'objectif le moins sûr : c'est une compétence neuve pour l'agent, une seule
+session peut ne pas suffire.

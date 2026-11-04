@@ -74,13 +74,9 @@ def ball_at(pos, vel, t: float) -> Tuple[float, float, float]:
     return (fold(pos[0] + vel[0] * d, X_WALL), fold(pos[1] + vel[1] * d, Y_WALL), ball_z_at(pos[2], vel[2], t))
 
 
-def goal_entry_time(pos, vel, goal_sign: float, horizon: float = THREAT_HORIZON) -> Optional[float]:
-    """Temps avant que la balle entre dans le but situé en y = goal_sign × 5120 (None si elle n'y va pas, sort du
-    cadre ou arrive après `horizon`). Balle déjà sur la ligne dans le cadre → 0."""
-    x0, y0, z0 = pos[0], pos[1], pos[2]
-    if goal_sign * y0 >= GOAL_Y - R and abs(x0) < POST_X and z0 < BAR_Z:
-        return 0.0
-    vy = vel[1] * goal_sign
+def _line_crossing(y0: float, vy_world: float, goal_sign: float, horizon: float) -> Optional[Tuple[float, float]]:
+    """(distance à vitesse unité, temps) pour atteindre la ligne de but, None si la balle n'y arrive pas dans `horizon`."""
+    vy = vy_world * goal_sign
     if vy <= 1.0:
         return None
     need = (GOAL_Y - goal_sign * y0) / vy        # distance « à vitesse unité » nécessaire
@@ -90,8 +86,25 @@ def goal_entry_time(pos, vel, goal_sign: float, horizon: float = THREAT_HORIZON)
     if k_need >= 1.0:                            # le frottement l'arrête avant
         return None
     t = -math.log(1.0 - k_need) / BALL_DRAG
-    if t > horizon:
+    return None if t > horizon else (need, t)
+
+
+def goal_line_time(pos, vel, goal_sign: float, horizon: float = THREAT_HORIZON) -> Optional[float]:
+    """Temps pour que la balle atteigne la ligne de but en y = goal_sign × 5120, dans le cadre ou non."""
+    cross = _line_crossing(pos[1], vel[1], goal_sign, horizon)
+    return None if cross is None else cross[1]
+
+
+def goal_entry_time(pos, vel, goal_sign: float, horizon: float = THREAT_HORIZON) -> Optional[float]:
+    """Temps avant que la balle entre dans le but situé en y = goal_sign × 5120 (None si elle n'y va pas, sort du
+    cadre ou arrive après `horizon`). Balle déjà sur la ligne dans le cadre → 0."""
+    x0, y0, z0 = pos[0], pos[1], pos[2]
+    if goal_sign * y0 >= GOAL_Y - R and abs(x0) < POST_X and z0 < BAR_Z:
+        return 0.0
+    cross = _line_crossing(y0, vel[1], goal_sign, horizon)
+    if cross is None:
         return None
+    need, t = cross
     x = fold(x0 + vel[0] * need, X_WALL)
     z = ball_z_at(z0, vel[2], t)
     if abs(x) < POST_X and z < BAR_Z:

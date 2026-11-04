@@ -13,7 +13,11 @@ env:
   # 1v1 uniquement : le match se joue en 1v1 (README) ; 2v2/3v3 plus tard. Les profils FUSIONNENT les dictionnaires :
   # 2 et 3 doivent être mis à 0 explicitement (sinon ceux de default.yaml restent).
   format_weights: {1: 1.0, 2: 0.0, 3: 0.0}
-  start_weights: {kickoff: 0.5, random: 0.5}   # pas d'exercices tant que les bases ne sont pas là
+  # Palier 5 : l'agent ne voit presque jamais de balle haute avec du boost (audit du 04/11 : < 10 de boost 71 % du temps).
+  # Exercices = états de départ, le reste de l'épisode est un match normal ; leur niveau suit la réussite.
+  start_weights: {kickoff: 0.4, random: 0.3, drill_aerial: 0.2, drill_shot: 0.1}
+  # Plancher 0,4 : balles à 580-890 uu, au-dessus du seuil des rewards aériens et hors de portée d'un simple saut
+  drill_curriculum: {enabled: true, start: 0.4, min_level: 0.4, step: 0.005, promote: 0.6, demote: 0.3}
   no_touch_timeout_s: 10
   episode_timeout_s: 300
   ball_prediction: true            # observation de s6 (sans course ni pads) : s6 peut servir d'ancre
@@ -55,6 +59,10 @@ rewards:
   touch_aerial_bonus: 0.0
   flip_speed_min_speed: 300.0
   aerial_min_z: 500.0              # aerial_touch : balle au-dessus de 500 uu (220 avant : une touche en sautant suffisait)
+  aerial_min_air_boost_s: 0.25     # et boost en l'air depuis le décollage (86 % des touches payées : sauts depuis un mur)
+  air_approach_boost_only: true    # air_approach paie le vol boosté, plus les sauts et flips vers une balle haute
+  shot_off_target_factor: 0.25     # shot : frappe hors cadre dans le camp adverse payée au quart
+  shot_threat_floor: 0.5           # shot_threat : moitié de la valeur dès que la balle est cadrée, le reste à l'approche
   weights:
     goal: 10.0
     strong_touch: 4.0              # |Δv balle| : 0 sous 20 km/h, plein à 100 km/h
@@ -97,11 +105,20 @@ curriculum:
     - name: precision
       rewards: {vel_player_to_ball: 0.06, strong_touch: 1.5, shot: 5.0, vel_ball_to_goal: 0.35, kickoff_win: 3.0,
                 aerial_touch: 2.0, air_approach: 0.05}
+      advance: {ladder/gap/s6_spo_kaggle: 150}  # 2e session TPU : +465 à 5,38 G steps → passage dès la reprise
+    # Palier 5 (04/11, après les premiers matchs dans le vrai jeu) : 50 % des touches sur sa propre balle cadrée la
+    # décadrent, 35 % de frappes cadrées, 0,1 vraie aérienne/min (REFONTE_S10 §9). On paie la balle cadrée et on reprend
+    # la déviation (shot_threat), on rend le vol rentable, et on ne touche PAS à ce qui fait le jeu agressif de l'agent :
+    # vel_player_to_ball, flip_speed, demo, bump et vel_ball_to_goal gardent leur poids, dépenser du boost reste gratuit.
+    - name: finition
+      rewards: {shot_threat: 3.0, strong_touch: 1.0, aerial_touch: 4.0, air_approach: 0.15, boost_gain: 1.0}
+      ppo: {ent_coef: 0.005}       # une aérienne, c'est 1-2 s d'actions cohérentes : 24 actions tirées au hasard n'y arrivent pas
 selfplay:
   hist_prob: 0.2
   pool_every_steps: 5_000_000
   pool_recent: 20
   pfsp: false
   ladder: true                     # selfplay/ladder.py
+  ladder_fit_every: 10             # itérations entre deux calculs de l'échelle (coût en n² : 0,8 s à 1 000 versions)
   anchors: [runs/s6_spo_kaggle]    # meilleur ancien agent, comme repère fixe
   anchor_prob: 0.15                # 3 % des épisodes

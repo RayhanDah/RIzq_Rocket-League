@@ -116,7 +116,8 @@ class Ladder:
         ladder/gap/<nom> : ladder/elo − note de l'ancre (> 0 : la dernière version est au-dessus de l'ancre)."""
         out: Dict[str, float] = {}
         versions = self._versions()
-        latest = self.ratings.get(versions[-1]) if versions else None
+        # dernière version notée : l'échelle n'est pas recalculée à chaque itération (selfplay.ladder_fit_every)
+        latest = next((self.ratings[v] for v in reversed(versions) if v in self.ratings), None)
         if latest is not None:
             out["ladder/elo"] = latest
             out["ladder/versions"] = float(len(versions))

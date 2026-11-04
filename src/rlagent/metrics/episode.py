@@ -7,6 +7,9 @@ Jeu d'équipe (équipes de 2+ joueurs) :
 Kickoff : vainqueur = équipe qui marque dans les 3 s, sinon équipe dans le camp ADVERSE de laquelle se trouve la balle à 3 s.
 Tirs / arrêts (env/predict.py) : tir = touche après laquelle la trajectoire entre dans le cadre adverse (et n'y entrait
 pas avant) ; arrêt = touche après laquelle une trajectoire qui entrait dans NOTRE cadre n'y entre plus.
+Style (palier 5, mêmes définitions que scripts/style_audit.py) : déviation = touche qui fait sortir du cadre SA propre
+balle cadrée ; hors cadre = frappe qui atteint la ligne de but hors du cadre ; vraie aérienne = touche en l'air, balle
+au-dessus de 500 uu, après 0,25 s de boost depuis le décollage.
 """
 from __future__ import annotations
 
@@ -17,7 +20,7 @@ from rlgym.rocket_league import common_values as cv
 from rlgym.rocket_league.api import GameState
 
 from ..env.common import norm3
-from ..env.predict import goal_threat
+from ..env.predict import goal_line_time, goal_threat
 from ..env.rewards import DoubleCommitTerm
 
 KICKOFF_EVAL_S = 3.0
@@ -30,6 +33,10 @@ NO_GOAL_DRILLS = ("defense", "aerial_defense")   # réussite = aucun but encaiss
 AERIAL_TOUCH_Z = 400.0                          # exercice aérien sans niveau (s6)
 AERIAL_TOUCH_Z_LEVEL = (200.0, 700.0)           # avec niveau : hauteur de touche exigée au niveau 0 → 1
 AERIAL_MIN_Z = 220.0                            # touche « aérienne » : voiture en l'air, balle au-dessus
+TRUE_AERIAL_Z = 500.0                           # vraie aérienne : balle au-dessus (comme rewards.aerial_min_z)…
+TRUE_AERIAL_BOOST_S = 0.25                      # … et boost en l'air depuis le décollage
+WALL_TAKEOFF_Z = 300.0                          # décollage au-dessus : la voiture quitte un mur
+STRONG_HIT = 556.0                              # |Δv balle| d'une frappe (uu/s), seuil de strong_touch
 LOW_BOOST = 10.0
 
 
@@ -64,6 +71,12 @@ class EpisodeTracker:
         self.aerial_touches = 0
         self.shots = 0
         self.saves = 0
+        self.off_target = 0
+        self.spoils = 0
+        self.true_aerials = 0
+        self.wall_aerials = 0
+        self.air_boost_ticks: Dict[Any, int] = {}
+        self.takeoff_z: Dict[Any, float] = {}
         # mécaniques (toutes les voitures) : sommes sur (voitures × steps)
         self.car_steps = 0
         self.boost_sum = 0.0
@@ -75,6 +88,11 @@ class EpisodeTracker:
         self.flips = 0
         self.low_boost_steps = 0
         self.speed_sum = 0.0
+        self.air_boost_steps = 0
+        self.ball_dist_sum = 0.0
+        self.opp_half_steps = 0
+        self.bumps = 0
+        self.prev_victim: Dict[Any, Any] = {}
         self.prev_car: Dict[Any, tuple] = {}
         self.prev_ball = None
         if state is not None:
@@ -90,10 +108,16 @@ class EpisodeTracker:
 
     def step(self, state: GameState) -> None:
         self.steps += 1
+        dt_ticks = state.tick_count - self.last_tick
         self.last_tick = state.tick_count
         cars = state.cars
         touch_teams = set()
-        for car in cars.values():
+        for a, car in cars.items():
+            if car.on_ground:
+                self.air_boost_ticks[a] = 0
+                self.takeoff_z[a] = float(car.physics.position[2])
+            elif car.is_boosting:
+                self.air_boost_ticks[a] = self.air_boost_ticks.get(a, 0) + dt_ticks
             if car.ball_touches > 0:
                 self.touches[car.team_num] = self.touches.get(car.team_num, 0) + 1
                 touch_teams.add(car.team_num)
@@ -101,6 +125,11 @@ class EpisodeTracker:
                     self.air_touches += 1
                 if not car.on_ground and state.ball.position[2] > AERIAL_MIN_Z:
                     self.aerial_touches += 1
+                if not car.on_ground and state.ball.position[2] > TRUE_AERIAL_Z:
+                    if self.air_boost_ticks.get(a, 0) >= TRUE_AERIAL_BOOST_S * cv.TICKS_PER_SECOND:
+                        self.true_aerials += 1
+                    elif self.takeoff_z.get(a, 0.0) > WALL_TAKEOFF_Z:
+                        self.wall_aerials += 1
         ball_now = (state.ball.position.tolist(), state.ball.linear_velocity.tolist())
         if touch_teams and self.prev_ball is not None:
             self._shots_saves(touch_teams, self.prev_ball, ball_now)
@@ -136,14 +165,22 @@ class EpisodeTracker:
                 self.kickoff_done = True
 
     def _shots_saves(self, teams, before, after) -> None:
+        dv = [after[1][i] - before[1][i] for i in range(3)]
+        strong = dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2] >= STRONG_HIT * STRONG_HIT
         for team in teams:
             opp_sign = 1.0 if team == cv.BLUE_TEAM else -1.0     # le bleu attaque vers +Y
-            if goal_threat(*after, opp_sign) > 0.0 and goal_threat(*before, opp_sign) == 0.0:
+            was, now = goal_threat(*before, opp_sign), goal_threat(*after, opp_sign)
+            if now > 0.0 and was == 0.0:
                 self.shots += 1
+            elif was > 0.0 and now == 0.0:
+                self.spoils += 1
+            elif now == 0.0 and strong and goal_line_time(*after, opp_sign) is not None:
+                self.off_target += 1
             if goal_threat(*before, -opp_sign) > 0.0 and goal_threat(*after, -opp_sign) == 0.0:
                 self.saves += 1
 
     def _mechanics(self, state: GameState) -> None:
+        ball = state.ball.position
         for a, car in state.cars.items():
             boost, jumped, demo = float(car.boost_amount), bool(car.has_jumped), float(car.demo_respawn_timer)
             flipped = bool(car.has_flipped)
@@ -151,6 +188,11 @@ class EpisodeTracker:
             self.car_steps += 1
             self.boost_sum += boost
             self.speed_sum += norm3(car.physics.linear_velocity)
+            self.ball_dist_sum += norm3(car.physics.position - ball)
+            self.opp_half_steps += float(car.physics.position[1]) * (1.0 if car.team_num == cv.BLUE_TEAM else -1.0) > 0.0
+            victim = car.bump_victim_id
+            self.bumps += victim is not None and victim != self.prev_victim.get(a)
+            self.prev_victim[a] = victim
             if boost < LOW_BOOST:
                 self.low_boost_steps += 1
             if flipped and not pf:
@@ -161,6 +203,7 @@ class EpisodeTracker:
                 self.jumps += 1
             if not car.on_ground:
                 self.air_steps += 1
+                self.air_boost_steps += bool(car.is_boosting)
             if car.is_supersonic:
                 self.supersonic_steps += 1
                 if car.is_boosting and car.on_ground:      # boost au-delà de la vitesse max au sol : gaspillé
@@ -212,6 +255,10 @@ class EpisodeTracker:
             "aerial_touches_per_min": self.aerial_touches / minutes,
             "shots_per_min": self.shots / minutes,
             "saves_per_min": self.saves / minutes,
+            "off_target_per_min": self.off_target / minutes,
+            "spoils_per_min": self.spoils / minutes,
+            "true_aerials_per_min": self.true_aerials / minutes,
+            "wall_aerials_per_min": self.wall_aerials / minutes,
             "kickoff_winner": self.kickoff_winner,
         }
         if self.car_steps > 0:
@@ -226,6 +273,10 @@ class EpisodeTracker:
                 "flips_per_min": self.flips / car_minutes,
                 "low_boost_frac": self.low_boost_steps / self.car_steps,
                 "avg_speed": self.speed_sum / self.car_steps,
+                "air_boost_frac": self.air_boost_steps / max(1, self.air_steps),
+                "ball_dist": self.ball_dist_sum / self.car_steps,
+                "opp_half_frac": self.opp_half_steps / self.car_steps,
+                "bumps_per_min": self.bumps / car_minutes,
             }
         if self.drill is not None:
             result = self.drill_result
