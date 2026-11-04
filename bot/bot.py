@@ -48,7 +48,8 @@ class Agent:
 
 class RLAgentBot(RLGymBot):
     def __init__(self):
-        self.agent = Agent(HERE / "model.pt")
+        # argmax : mêmes poids, sans le bruit de l'échantillonnage (s10, 04/11 : 24-8-8 contre la version échantillonnée)
+        self.agent = Agent(HERE / "model.pt", deterministic=True)
         super().__init__(
             obs_builder=AttentionObs(ball_prediction=self.agent.ball_prediction,
                                      race_features=self.agent.race_features,
