@@ -24,7 +24,7 @@ from rlgym.api import RewardFunction
 from rlgym.rocket_league import common_values as cv
 from rlgym.rocket_league.api import GameState
 
-from .common import OPP_GOAL_BACK, OWN_GOAL_BACK, norm3
+from .common import OPP_GOAL_BACK, OWN_GOAL_BACK, is_flip_reset, norm3
 from .predict import ETA_CAP, goal_threat, race_info, team_etas
 
 
@@ -140,6 +140,30 @@ class BoostGainTerm(RewardTerm):
             delta = math.sqrt(max(b, 0.0) / 100.0) - math.sqrt(max(prev, 0.0) / 100.0)
             out[a] = (delta if prev < self.below else 0.0) if delta >= 0 else self.loss_coef * delta
             self.prev[a] = b
+        return out
+
+
+class BoostSpendTerm(RewardTerm):
+    """Dépense de boost près du sol (palier 6, recette de Necto) : Δ√boost (négatif), atténué avec la hauteur, nul à partir
+    de la barre : le vol reste gratuit. `boost_gain` ne paie que les gains et paie plus à sec : sans ce terme, brûler son
+    boost pour le reprendre rapporte, et l'agent roule sous 10 de boost 65 % du temps (audit du 06/11)."""
+    name = "boost_spend"
+
+    def __init__(self):
+        self.prev: Dict[str, float] = {}
+
+    def reset(self, agents, state, shared_info):
+        self.prev = {a: state.cars[a].boost_amount for a in agents}
+
+    def get(self, agents, state, shared_info):
+        out = {}
+        for a in agents:
+            car = state.cars[a]
+            b = car.boost_amount
+            delta = math.sqrt(max(b, 0.0) / 100.0) - math.sqrt(max(self.prev.get(a, b), 0.0) / 100.0)
+            self.prev[a] = b
+            low = max(0.0, 1.0 - float(car.physics.position[2]) / cv.GOAL_HEIGHT)
+            out[a] = delta * low if delta < 0.0 and not car.is_demoed else 0.0
         return out
 
 
@@ -517,6 +541,36 @@ class AerialTouchTerm(RewardTerm):
             out[a] = (0.5 + 1.5 * height) * min(1.0 + 0.5 * k, 2.0)
             self.chain[a] = k + 1
             self.last_tick[a] = tick
+        return out
+
+
+class FlipResetTerm(RewardTerm):
+    """Flip reset (palier 6, `flip_reset_w` de Necto) : +1 quand les roues touchent la balle en l'air (common.is_flip_reset).
+    Les bots ne le découvrent pas seuls (guide RLGym-PPO). `cooldown_s` par voiture : rester posé sur une balle en l'air
+    ne se farme pas contact après contact, enchaîner de vrais resets reste payé."""
+    name = "flip_reset"
+
+    def __init__(self, cooldown_s: float = 1.0):
+        self.cooldown = int(round(cooldown_s * cv.TICKS_PER_SECOND))
+        self.prev: Dict[str, Tuple[bool, bool]] = {}
+        self.last_tick: Dict[str, int] = {}
+
+    def reset(self, agents, state, shared_info):
+        self.prev = {a: (bool(state.cars[a].on_ground), bool(state.cars[a].has_jumped)) for a in agents}
+        self.last_tick = {}
+
+    def get(self, agents, state, shared_info):
+        tick = int(getattr(state, "tick_count", 0) or 0)
+        out = {}
+        for a in agents:
+            car = state.cars[a]
+            ground, jumped = self.prev.get(a, (True, False))
+            self.prev[a] = (bool(car.on_ground), bool(car.has_jumped))
+            out[a] = 0.0
+            last = self.last_tick.get(a)
+            if (last is None or tick - last >= self.cooldown) and is_flip_reset(car, state.ball.position, ground, jumped):
+                out[a] = 1.0
+                self.last_tick[a] = tick
         return out
 
 
@@ -918,6 +972,9 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         BumpTerm(),
         # palier 5 « finition » (04/11/2026)
         ShotThreatPotential(gamma, floor=rc.get("shot_threat_floor", 0.5)),
+        # palier 6 « maitrise » (06/11/2026)
+        BoostSpendTerm(),
+        FlipResetTerm(cooldown_s=rc.get("flip_reset_cooldown_s", 1.0)),
     ]
     stages = (cfg.get("curriculum") or {}).get("stages") or []
     return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0),

@@ -31,7 +31,8 @@ WALL_TAKEOFF_Z = 300.0         # décollage au-dessus : la voiture quitte un mur
 STRONG_DV = 556.0              # frappe (uu/s), seuil de strong_touch
 
 COUNTERS = ("goals", "touches", "strong_touches", "on_target", "off_target", "spoils", "on_target_balls", "saves",
-            "aerial_touches", "true_aerials", "wall_aerials", "aerial_goals", "bumps", "demos", "flips", "pickups")
+            "aerial_touches", "true_aerials", "wall_aerials", "aerial_goals", "flip_resets", "bumps", "demos", "flips",
+            "pickups")
 SUMS = ("speed", "boost", "supersonic", "air", "air_boost", "low_boost", "own_half", "ball_dist", "closer", "steps")
 
 _env = None
@@ -67,6 +68,7 @@ def actor(spec: str):
 
 def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
     import torch
+    from rlagent.env.common import is_flip_reset
     from rlagent.env.predict import goal_line_time, goal_threat
     env = _env
     pol = {"A": actor(spec_a), "B": actor(spec_b)}
@@ -77,7 +79,8 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
         s = env.state
         ball = (s.ball.position.tolist(), s.ball.linear_velocity.tolist())
         cars = {a: {"flip": bool(c.has_flipped), "demo": float(c.demo_respawn_timer), "boost": float(c.boost_amount),
-                    "victim": c.bump_victim_id, "air_boost": 0.0, "takeoff_z": 17.0, "ground": bool(c.on_ground)}
+                    "victim": c.bump_victim_id, "air_boost": 0.0, "takeoff_z": 17.0, "ground": bool(c.on_ground),
+                    "jumped": bool(c.has_jumped)}
                 for a, c in s.cars.items()}
         return ball, cars
 
@@ -148,7 +151,9 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
                         d["true_aerials"] += 1
                     elif p["takeoff_z"] > WALL_TAKEOFF_Z:
                         d["wall_aerials"] += 1
-            p.update(flip=bool(car.has_flipped), demo=demo, boost=boost, victim=car.bump_victim_id)
+            d["flip_resets"] += is_flip_reset(car, state.ball.position, p["ground"], p["jumped"])
+            p.update(flip=bool(car.has_flipped), demo=demo, boost=boost, victim=car.bump_victim_id, ground=ground,
+                     jumped=bool(car.has_jumped))
         prev_ball = (pos, vel)
         scored = any(term.values())
         if scored:
@@ -189,6 +194,7 @@ def summarize(d: dict) -> dict:
                      "arrets/min": per_min("saves")},
         "aerien": {"touches_aeriennes/min": per_min("aerial_touches"), "vraies_aeriennes/min": per_min("true_aerials"),
                    "depuis_mur/min": per_min("wall_aerials"), "buts_aeriens/min": per_min("aerial_goals"),
+                   "flip_resets/min": per_min("flip_resets"),
                    "temps_en_l_air_%": 100 * d["air"] / n, "boost_en_l_air_%": 100 * d["air_boost"] / max(1.0, d["air"]),
                    "boost_moyen": d["boost"] / n, "moins_de_10_boost_%": 100 * d["low_boost"] / n,
                    "ramassages/min": per_min("pickups")},

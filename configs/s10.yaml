@@ -9,15 +9,22 @@
 # curriculum/stage, mech/flips_per_min, touches_per_min.
 train:
   init_from: null                  # de zéro
+  total_steps: 100_000_000_000     # default.yaml : 10 G, atteint en plein milieu de la session 4 (8,14 G au départ)
 env:
   # 1v1 uniquement : le match se joue en 1v1 (README) ; 2v2/3v3 plus tard. Les profils FUSIONNENT les dictionnaires :
   # 2 et 3 doivent être mis à 0 explicitement (sinon ceux de default.yaml restent).
   format_weights: {1: 1.0, 2: 0.0, 3: 0.0}
-  # Palier 5 : l'agent ne voit presque jamais de balle haute avec du boost (audit du 04/11 : < 10 de boost 71 % du temps).
   # Exercices = états de départ, le reste de l'épisode est un match normal ; leur niveau suit la réussite.
-  start_weights: {kickoff: 0.4, random: 0.3, drill_aerial: 0.2, drill_shot: 0.1}
-  # Plancher 0,4 : balles à 580-890 uu, au-dessus du seuil des rewards aériens et hors de portée d'un simple saut
-  drill_curriculum: {enabled: true, start: 0.4, min_level: 0.4, step: 0.005, promote: 0.6, demote: 0.3}
+  # Palier 6 : Necto ne démarrait que 8 % de ses épisodes par un kickoff (70 % depuis des replays, surtout aériens). Faute
+  # de replays, on varie les situations. `drill_air` : le vol à partir de la fin du geste (l'exercice `aerial` plafonne à
+  # 3,7 %). `drill_reset` : roues face à la balle, pour que le reward `flip_reset` puisse se déclencher.
+  start_weights: {kickoff: 0.3, random: 0.15, aerial: 0.05, attack_defense: 0.05, drill_air: 0.15, drill_reset: 0.05,
+                  drill_aerial: 0.05, drill_shot: 0.05, drill_wall: 0.05, drill_low_boost: 0.05, drill_aerial_defense: 0.05}
+  # Plancher 0,4 de l'aérien : balles à 580-890 uu, au-dessus du seuil des rewards aériens et hors de portée d'un simple
+  # saut. Vol et reset partent de 0 (leur niveau mesure justement le recul par rapport au geste).
+  drill_curriculum: {enabled: true, start: 0.4, min_level: 0.4, step: 0.005, promote: 0.6, demote: 0.3,
+                     per_kind: {air: {start: 0.0, min_level: 0.0}, reset: {start: 0.0, min_level: 0.0},
+                                aerial_defense: {start: 0.2, min_level: 0.0}}}
   no_touch_timeout_s: 10
   episode_timeout_s: 300
   ball_prediction: true            # observation de s6 (sans course ni pads) : s6 peut servir d'ancre
@@ -37,7 +44,7 @@ ppo:
   batch_steps: 100_000
   minibatch_size: 50_000
   epochs: 2
-  gamma: 0.99
+  gamma: 0.995                     # 10 s de demi-vie, comme Necto : ramasser du boost paie plus de 5 s plus tard
   gae_lambda: 0.95
   ent_coef: 0.01
   vf_coef: 1.0
@@ -113,12 +120,23 @@ curriculum:
     - name: finition
       rewards: {shot_threat: 3.0, strong_touch: 1.0, aerial_touch: 4.0, air_approach: 0.15, boost_gain: 1.0}
       ppo: {ent_coef: 0.005}       # une aérienne, c'est 1-2 s d'actions cohérentes : 24 actions tirées au hasard n'y arrivent pas
+      advance: {ladder/gap/s6_spo_kaggle: 150}  # 3e session TPU : +528 à 8,14 G steps → passage dès la reprise
+    # Palier 6 (06/11, après les matchs du PO, REFONTE_S10 §10) : garder ce qui marche, retirer ce qui paie encore les
+    # sauts. `in_air` et `flip_speed` sont des aides du palier 1 ; `boost_gain` paie le ramassage sans compter la
+    # dépense, et plus on est à sec plus il paie. Dépense au sol facturée comme Necto, vol gratuit. `flip_reset` à 5 : le
+    # contact des roues compte comme un retour au sol, il ne paie pas `aerial_touch` (~4 pour une touche du nez à 1 000 uu).
+    - name: maitrise
+      rewards: {boost_spend: 0.5, in_air: 0.002, flip_speed: 0.1, kickoff_rush: 0.05, flip_reset: 5.0}
+      ppo: {ent_coef: 0.003}       # 2,67 nats à 8,14 G : le guide RLGym vise ~2
 selfplay:
-  hist_prob: 0.2
+  hist_prob: 0.25
   pool_every_steps: 5_000_000
   pool_recent: 20
-  pfsp: false
+  pfsp: true                       # (1 − p)² : les ancres déjà battues ne coûtent presque plus de parties
   ladder: true                     # selfplay/ladder.py
-  ladder_fit_every: 10             # itérations entre deux calculs de l'échelle (coût en n² : 0,8 s à 1 000 versions)
-  anchors: [runs/s6_spo_kaggle]    # meilleur ancien agent, comme repère fixe
-  anchor_prob: 0.15                # 3 % des épisodes
+  ladder_fit_every: 20             # itérations entre deux calculs de l'échelle (coût en n², ~1 600 versions au départ)
+  # s6 : repère de l'échelle. Les autres : styles différents et forts, le pool récent ne couvre que 100 M steps et les
+  # résultats ne sont pas transitifs (v6800 bat v7000 24-6, 8,14 G bat v6800 20-8). v8100 = le bot actuel.
+  anchors: [runs/s6_spo_kaggle, pool/actor_0005315235148.pt, pool/actor_0006800183709.pt, pool/actor_0007000329112.pt,
+            pool/actor_0007565061406.pt, pool/actor_0008100114172.pt]
+  anchor_prob: 0.5                 # 12,5 % des épisodes

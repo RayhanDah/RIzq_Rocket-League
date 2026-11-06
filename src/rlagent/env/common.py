@@ -46,6 +46,26 @@ def team_proximity_ranks(state: GameState) -> Dict[str, int]:
     return ranks
 
 
+def is_flip_reset(car: Car, ball_pos, prev_on_ground: bool, prev_jumped: bool) -> bool:
+    """Roues contre la balle, loin de toute surface : le saut et le flip sont rendus. RocketSim traite ce contact comme un
+    retour au sol (`on_ground` vrai à 800 uu de haut, `has_jumped` remis à faux, test du 06/11). Géométrie de Necto :
+    voiture au-dessus de 3 rayons de balle, balle proche (2,5 rayons : 8 ticks peuvent séparer le contact de la fin du
+    step) et sous les roues (cos > 0,9)."""
+    if car.ball_touches <= 0 or (prev_on_ground and not prev_jumped):
+        return False
+    if not (car.on_ground or (prev_jumped and not car.has_jumped)):
+        return False
+    pos = car.physics.position
+    if float(pos[2]) <= 3.0 * cv.BALL_RADIUS:
+        return False
+    d = ball_pos - pos
+    dist = norm3(d)
+    if dist <= 1e-6 or dist >= 2.5 * cv.BALL_RADIUS:
+        return False
+    up = car.physics.up
+    return -float(d[0] * up[0] + d[1] * up[1] + d[2] * up[2]) / dist > 0.9
+
+
 def is_kickoff_state(state: GameState) -> bool:
     b = state.ball
     return bool(abs(b.position[0]) < 1 and abs(b.position[1]) < 1 and norm3(b.linear_velocity) < 1)

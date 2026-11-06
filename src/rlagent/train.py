@@ -153,14 +153,17 @@ class DrillCurriculum:
     trivial, ni impossible). Niveau 0 = version facile (ex. aérien : toucher une balle à 300 uu en sautant), 1 = cible
     (aérienne vers le plafond). Envoyé aux workers (shared_info["drill_levels"]), sauvegardé avec les checkpoints.
     `min_level` : plancher. Sans lui, un exercice raté redescend jusqu'à ne plus demander la compétence visée (validation
-    du 04/11 : aérien réussi à 3 %, le niveau baissait vers des balles à 200 uu, sous le seuil des rewards aériens)."""
+    du 04/11 : aérien réussi à 3 %, le niveau baissait vers des balles à 200 uu, sous le seuil des rewards aériens).
+    `per_kind` : {exercice: {start, min_level}} pour s'écarter de ces valeurs (le vol part de 0, cf. mutators.AirDrill)."""
 
     def __init__(self, kinds, start: float = 0.0, step: float = 0.01, promote: float = 0.65, demote: float = 0.35,
-                 ema: float = 0.05, min_level: float = 0.0):
-        self.levels = {k: float(start) for k in kinds}
+                 ema: float = 0.05, min_level: float = 0.0, per_kind: Optional[Dict[str, Dict[str, float]]] = None):
+        per_kind = per_kind or {}
+        self.levels = {k: float(per_kind.get(k, {}).get("start", start)) for k in kinds}
         self.success = {k: 0.5 for k in kinds}
         self.step, self.promote, self.demote, self.ema = float(step), float(promote), float(demote), float(ema)
         self.min_level = float(min_level)
+        self.min_levels = {k: float(per_kind.get(k, {}).get("min_level", min_level)) for k in kinds}
 
     @classmethod
     def from_cfg(cls, cfg: Dict[str, Any]) -> Optional["DrillCurriculum"]:
@@ -171,7 +174,8 @@ class DrillCurriculum:
         weights = cfg["env"]["start_weights"]
         kinds = [k for k in LEVELED_DRILLS if float(weights.get("drill_" + k, 0.0)) > 0.0]
         return cls(kinds, start=dc.get("start", 0.0), step=dc.get("step", 0.01), promote=dc.get("promote", 0.65),
-                   demote=dc.get("demote", 0.35), ema=dc.get("ema", 0.05), min_level=dc.get("min_level", 0.0))
+                   demote=dc.get("demote", 0.35), ema=dc.get("ema", 0.05), min_level=dc.get("min_level", 0.0),
+                   per_kind=dc.get("per_kind"))
 
     def update(self, episodes: List[Dict[str, Any]]) -> None:
         seen = set()
@@ -184,7 +188,7 @@ class DrillCurriculum:
             if self.success[k] > self.promote:
                 self.levels[k] = min(1.0, self.levels[k] + self.step)
             elif self.success[k] < self.demote:
-                self.levels[k] = max(self.min_level, self.levels[k] - self.step)
+                self.levels[k] = max(self.min_levels[k], self.levels[k] - self.step)
 
     def metrics(self) -> Dict[str, float]:
         out = {f"curriculum/{k}/level": v for k, v in self.levels.items()}
@@ -225,7 +229,7 @@ def summarize_episodes(episodes: List[Dict[str, Any]]) -> Dict[str, float]:
     out["touches_per_min"] = float(np.mean([e["touches_per_min"] for e in episodes]))
     out["air_touches_per_min"] = float(np.mean([e["air_touches_per_min"] for e in episodes]))
     for key in ("aerial_touches_per_min", "shots_per_min", "saves_per_min", "off_target_per_min", "spoils_per_min",
-                "true_aerials_per_min", "wall_aerials_per_min"):
+                "true_aerials_per_min", "wall_aerials_per_min", "flip_resets_per_min"):
         vals = [e[key] for e in episodes if key in e]
         if vals:
             out[key] = float(np.mean(vals))

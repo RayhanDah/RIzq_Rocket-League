@@ -14,6 +14,7 @@ Options (désactivées par défaut, `selfplay.*`) :
   pour une part `anchor_prob` des épisodes contre l'historique. Figés à la 1re utilisation dans `pool/anchors/`
   (le run source peut continuer, tourner ses checkpoints ou être absent de la machine). Un ancien agent au bloc
   « soi » plus court joue via `fit_obs` (models/attention.py). Pas d'Elo pour eux (échelle d'un autre run).
+  `pool/actor_XXX.pt` désigne une version de CE run : sur Kaggle, le code n'est pas à côté de runs/.
 """
 from __future__ import annotations
 
@@ -29,7 +30,8 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 ANCHOR_PREFIX = "anchor:"
-PFSP_PRIOR = 2.0          # pseudo-épisodes à 0,5 : une version jamais jouée a p = 0,5 ; 1 victoire → 0,67, pas 1
+RUN_POOL = "pool"         # début de chemin d'une ancre tirée du pool de ce run
+PFSP_PRIOR = 2.0         # pseudo-épisodes à 0,5 : une version jamais jouée a p = 0,5 ; 1 victoire → 0,67, pas 1
 STATS_FILE = "pfsp_stats.json"
 
 
@@ -67,7 +69,9 @@ def resolve_anchor_file(path: Path) -> Optional[Path]:
 
 def _anchor_default_name(spec: str) -> str:
     p = Path(spec)
-    if p.suffix == ".pt" and p.parent.name in ("checkpoints", "pool"):
+    if p.parts[:1] == (RUN_POOL,):
+        name = p.stem
+    elif p.suffix == ".pt" and p.parent.name in ("checkpoints", "pool"):
         name = p.parent.parent.name if p.parent.name == "checkpoints" else f"{p.parent.parent.name}_{p.stem}"
     else:
         name = p.stem if p.suffix == ".pt" else p.name
@@ -155,7 +159,9 @@ class OpponentPool:
                     data = None  # même nom, autre source : l'utilisateur a changé d'ancre
             if data is None:
                 src = Path(spec)
-                if not src.is_absolute() and root is not None:
+                if src.parts[:1] == (RUN_POOL,):               # version de CE run : même chemin partout
+                    src = self.dir / src.relative_to(RUN_POOL)
+                elif not src.is_absolute() and root is not None:
                     src = Path(root) / src
                 src_file = resolve_anchor_file(src)
                 if src_file is None:

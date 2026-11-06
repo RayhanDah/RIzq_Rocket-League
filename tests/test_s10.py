@@ -20,8 +20,10 @@ def test_s10_effective_config(infra):
     cfg = load_config(infra + ["s10"])
     e, r = cfg["env"], cfg["rewards"]
     assert {k: v for k, v in e["format_weights"].items() if v > 0} == {1: 1.0}
-    assert {k: v for k, v in e["start_weights"].items() if v > 0} == {"kickoff": 0.4, "random": 0.3, "drill_aerial": 0.2,
-                                                                      "drill_shot": 0.1}
+    assert {k: v for k, v in e["start_weights"].items() if v > 0} == {
+        "kickoff": 0.3, "random": 0.15, "aerial": 0.05, "attack_defense": 0.05, "drill_air": 0.15, "drill_reset": 0.05,
+        "drill_aerial": 0.05, "drill_shot": 0.05, "drill_wall": 0.05, "drill_low_boost": 0.05,
+        "drill_aerial_defense": 0.05}
     assert not e.get("adaptive_drills") and (e["ball_prediction"], e["race_features"], e["boost_features"]) == (
         True, False, False)
     assert r["anneal"] is None and r["team_spirit"]["end"] == 0.0
@@ -351,3 +353,50 @@ def test_kaggle_output_download_resumes_after_network_cut(tmp_path, monkeypatch)
     files = kaggle_sync.download_output(FakeApi(), "u/k", tmp_path / "out")
     assert calls == [True, False] and len(files) == 2
     assert (tmp_path / "out" / "b.pt").read_bytes() == b"complet"
+
+
+def test_kaggle_fetch_keeps_recent_pool_versions_and_one_per_bucket():
+    """06/11 : 1 629 versions = ~2 h de téléchargement. Mais les 20 dernières sont les adversaires de l'entraînement : sans
+    elles, une reprise locale jouerait en silence contre des versions vieilles de 2 G steps."""
+    import re
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cloud"))
+    import kaggle_sync
+
+    steps = [i * 5_000_000 + 1_000 * (i % 7) for i in range(1, 401)]          # 5 M → 2 G, un peu après chaque multiple
+    pool = [f"runs/r/pool/actor_{s:013d}.pt" for s in steps]
+    others = ["runs/r.log", "runs/r/metrics.jsonl", "runs/r/ladder.json", "runs/r/config.yaml", "runs/r/latest.txt",
+              "runs/r/best_actor.pt", "runs/r/best_actor.txt", "runs/r/checkpoints/ckpt_0002000000000.pt",
+              "runs/r/pool/anchors/s6_spo_kaggle.pt", "runs/r/pool/pfsp_stats.json"]
+    pattern = re.compile(kaggle_sync.fetch_pattern(pool + others + ["runs/autre/pool/actor_0000000000001.pt"], "r"))
+
+    assert all(pattern.search(n) for n in others)
+    kept = [s for s, n in zip(steps, pool) if pattern.search(n)]
+    assert set(steps[-kaggle_sync.POOL_RECENT:]) <= set(kept)
+    assert {s // kaggle_sync.POOL_EVERY for s in kept} == {s // kaggle_sync.POOL_EVERY for s in steps}
+    assert len(kept) < len(steps) / 3
+    assert not pattern.search("runs/autre/pool/actor_0000000000001.pt") and not pattern.search("runs/r2/metrics.jsonl")
+
+
+def test_kaggle_move_tree_merges_without_copy(tmp_path):
+    """Le run n'existe plus en double dans dist/, et un rapatriement ne perd pas ce qui est déjà dans runs/<run>."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cloud"))
+    import kaggle_sync
+
+    src, target = tmp_path / "dist", tmp_path / "runs"
+    for path, data in (("metrics.jsonl", b"neuf"), ("pool/actor_2.pt", b"2"), ("pool/anchors/s6.pt", b"s6")):
+        (src / path).parent.mkdir(parents=True, exist_ok=True)
+        (src / path).write_bytes(data)
+    for path, data in (("metrics.jsonl", b"vieux"), ("RAPPORT.md", b"rapport"), ("pool/actor_1.pt", b"1")):
+        (target / path).parent.mkdir(parents=True, exist_ok=True)
+        (target / path).write_bytes(data)
+
+    kaggle_sync.move_tree(src, target)
+
+    assert (target / "metrics.jsonl").read_bytes() == b"neuf"
+    assert (target / "RAPPORT.md").read_bytes() == b"rapport" and (target / "pool/actor_1.pt").read_bytes() == b"1"
+    assert (target / "pool/anchors/s6.pt").read_bytes() == b"s6"
+    assert not [p for p in src.rglob("*") if p.is_file()]

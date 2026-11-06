@@ -337,3 +337,100 @@ Un agent qui atteint les objectifs mais franchit un plancher n'est pas retenu : 
 tous les 5 M steps), la meilleure version qui respecte les planchers. `best_actor.pt` choisit à l'Elo seul, il ne suffit
 donc pas à trancher. Les aériennes sont l'objectif le moins sûr : c'est une compétence neuve pour l'agent, une seule
 session peut ne pas suffire.
+
+## 10. Session 4 sur TPU : palier 6 « maîtrise » (06/11/2026)
+
+Bilan de la session 3 : `runs/s10_ppo_kaggle/RAPPORT.md`. Le PO a joué les versions dans le vrai jeu (4-3, 6-5 et 5-4 pour
+lui, contre 7-2 face au 5,315 G) et garde **`v8100`** (8,10 G) dans le bot : la plus forte à son goût, même sous le
+plancher de proximité. **La force passe désormais avant ce plancher.** Ce qu'il voit : mieux en aérienne, dans les duels
+et depuis les murs, gère mieux son boost, dévie moins ses balles. À améliorer, sans urgence : les kickoffs, et les sauts
+à répétition au lieu de ramasser du boost sur son chemin.
+
+### Ce qui se fait de mieux
+
+| Source | Ce qu'on en retient |
+|---|---|
+| Necto (champion RLBot 2022, base de Nexto, GC1), code public | γ 0,995 ; dépense de boost facturée seulement près du sol ; `flip_reset_w` = 10, autant qu'un but ; 70 % de départs depuis des replays, 8 % de kickoffs |
+| Opti (Kaiyotech), code public | un modèle par compétence (kickoff, pinch, pinch au plafond, flip reset, double tap, flick, mur, recovery…) et un sélecteur, chacun avec ses états de départ |
+| Guide RLGym-PPO | les mécaniques ne se découvrent pas seules ; boost en racine ; entropie vers 2 |
+| Fork de GigaLearn | une récompense dédiée par mécanique (speedflip, aérienne rapide, air dribble, atterrissage sur boost) |
+| RLBot Championship | ML : Necto 2022, Seer 2023, LeBot+ 2024, Slater 2025 (finale gagnée sur un tir au plafond) |
+
+### Diagnostic
+
+- **On paie encore les sauts** : `in_air` et `flip_speed` sont des aides du palier 1. L'agent passe 45 % du temps en l'air
+  et flippe 18 fois par minute.
+- **Rouler à sec rapporte** : `boost_gain` ne compte pas la dépense et paie plus à sec. Sous 10 de boost 63 % du temps ;
+  l'exercice boost à sec (atteindre 50 en 6 s) ne réussit qu'à 10 %.
+- **Horizon court** : γ 0,99 = 4,6 s de demi-vie, trop peu pour voir l'intérêt d'un boost ramassé.
+- **L'exercice aérien ne sert pas** : niveau bloqué à son plancher, 3,7 % de réussite, pour 20 % des épisodes.
+- **Adversaires étroits** : les 20 dernières versions couvrent 100 M steps, 17 minutes de run, et les duels ne sont pas
+  transitifs (`v6800` bat `v7000` 24-6, 8,14 G bat `v6800` 20-8).
+- **`train.total_steps` valait 10 G** (default.yaml) : la session se serait arrêtée après 5 h.
+
+### Ce qui change
+
+| | Palier 5 | **Palier 6** |
+|---|---|---|
+| `ppo.gamma` | 0,99 | **0,995** |
+| `ent_coef` | 0,005 | 0,003 |
+| `boost_spend` (nouveau : Δ√boost, atténué avec la hauteur, nul à partir de la barre) | 0 | **0,5** |
+| `in_air` | 0,008 | 0,002 |
+| `flip_speed` | 0,3 | 0,1 |
+| `kickoff_rush` (vitesse vers la balle jusqu'à la 1re touche, déjà codé) | 0 | 0,05 |
+| `flip_reset` (nouveau, +1 par reset, 1 s de délai ; le contact des roues ne paie pas `aerial_touch`) | 0 | **5,0** |
+| Kickoffs / aléatoire | 40 % / 30 % | 30 % / 15 % |
+| Situations variées (`aerial`, `attack_defense`) | 0 | 10 % |
+| Exercices | aérien 20 %, tir 10 % | **vol 15 %, reset 5 %**, aérien, tir, mur, boost à sec et défense aérienne 5 % chacun |
+| Adversaires | 20 dernières versions + s6 | + 5,315 G, `v6800`, `v7000`, 7,565 G, `v8100` en ancres, PFSP, 12,5 % des épisodes |
+
+Inchangés : `goal`, `shot`, `shot_threat`, `vel_ball_to_goal`, `vel_player_to_ball`, `aerial_touch`, `strong_touch`.
+
+**Exercice de vol** (`AirDrill`) : curriculum inversé, on part de la fin du geste. Niveau 0 : voiture déjà lancée vers la
+balle ; niveau 1 : juste décollée, loin, mal orientée. **Exercice reset** (`ResetDrill`) : roues face à la balle, flip déjà
+utilisé. Mesuré avec `v8100` tel quel dans RocketSim :
+
+| Réussite | Niveau 0 | Niveau 0,5 | Niveau 1 |
+|---|---|---|---|
+| Vol (touche au-dessus de 300 uu en 3 s) | 94 % | 14 % | 4 % |
+| Reset (un flip reset en 3 s) | 24 % | 10 % | 8 % |
+
+RocketSim reproduit le flip reset : un contact des roues avec la balle rend le saut et le flip, et compte comme un retour
+au sol (`on_ground` vrai à 800 uu). Contact du toit : rien. Une balle sans vitesse reste suspendue : ces exercices lui en donnent.
+
+**Validation sur le portable** (reprise du checkpoint à 8,14 G, 5,6 M steps) : variance expliquée stable (0,87-0,88) malgré
+le changement de γ, KL 0,001-0,0016, entropie 2,67 → 2,60. Parts du signal : `vel_ball_to_goal` 27 %, `goal` 17 %,
+`shot_threat` 15 %, `vel_player_to_ball` 14 %, `shot` 8 %, `boost_spend` 1,5 %, `aerial_touch` 1,2 %, `kickoff_rush` 0,7 %,
+`in_air` et `flip_speed` 0,4 %. Exercice de vol à 85 % : le niveau monte seul.
+
+**Essayé et écarté** : moyenner les poids des 20 dernières versions. Le modèle moyenné bat `v8100` 35-8-17 en argmax contre
+argmax, mais fait moins bien que lui contre `v8100` échantillonné (55,2 % des buts contre 57,2 %). Un duel argmax contre
+argmax mesure un duel, pas une force.
+
+### Critères fixés avant la session
+
+Contre le même adversaire, `v8100` échantillonné, l'agent en argmax, 200 matchs :
+
+```bash
+.venv\Scripts\python scripts/style_audit.py --a <nouvel agent> --b runs/s10_ppo_kaggle_s3/pool/actor_0008100114172.pt --det-a --games 200 --config runs/s10_ppo_kaggle_s3/config.yaml
+```
+
+Avant de rapatrier, renommer `runs/s10_ppo_kaggle` en `runs/s10_ppo_kaggle_s3` (et son `.log`).
+
+| Objectif | `v8100` | Visé |
+|---|---|---|
+| Part des buts | 57,2 % | > 65 % |
+| Vraies aériennes / min | 0,69 | > 1 |
+| Boost moyen | 18,3 | > 22 |
+| Moins de 10 de boost | 62,5 % | < 50 % |
+| Flips / min | 18,5 | < 15 |
+| Déviations | 35,7 % | < 30 % |
+| Précision | 44,2 % | > 47 % |
+| Flip resets / min | 0,003 | > 0,05 |
+
+À surveiller, sans seuil bloquant : proximité 52,8 %, vitesse 1 477, contacts 2,4 / min, kickoffs (balle chez l'adversaire
+à 3 s, contre `v8100`). L'entropie ne doit pas descendre vers 1,5. Le dernier mot reste aux matchs du PO dans le vrai jeu.
+
+Si les flips chutent sans que le boost monte, l'agent perd sa seule source de vitesse : c'est le risque de ce palier, à
+regarder en premier. Et les resets resteront rares : un reset utile suppose un contrôle aérien que l'agent n'a pas encore.
+La suite logique, d'après Opti : entraîner à part un modèle de kickoff, puis d'autres spécialistes, avec un sélecteur.

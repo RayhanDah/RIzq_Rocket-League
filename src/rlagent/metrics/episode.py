@@ -9,7 +9,7 @@ Tirs / arrêts (env/predict.py) : tir = touche après laquelle la trajectoire en
 pas avant) ; arrêt = touche après laquelle une trajectoire qui entrait dans NOTRE cadre n'y entre plus.
 Style (palier 5, mêmes définitions que scripts/style_audit.py) : déviation = touche qui fait sortir du cadre SA propre
 balle cadrée ; hors cadre = frappe qui atteint la ligne de but hors du cadre ; vraie aérienne = touche en l'air, balle
-au-dessus de 500 uu, après 0,25 s de boost depuis le décollage.
+au-dessus de 500 uu, après 0,25 s de boost depuis le décollage. Flip reset (palier 6) : env/common.is_flip_reset.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional
 from rlgym.rocket_league import common_values as cv
 from rlgym.rocket_league.api import GameState
 
-from ..env.common import norm3
+from ..env.common import is_flip_reset, norm3
 from ..env.predict import goal_line_time, goal_threat
 from ..env.rewards import DoubleCommitTerm
 
@@ -28,8 +28,9 @@ KICKOFF_EVAL_S = 3.0
 # Réussite des exercices (env/mutators.py, `drill_*`) pour l'équipe testée, dans une fenêtre en secondes.
 # "defense" réussit si aucun but n'est encaissé dans la fenêtre ; les autres si la condition est vue dans la fenêtre.
 DRILL_WINDOW_S = {"defense": 6.0, "shot": 6.0, "aerial": 4.0, "wall": 5.0, "low_boost": 6.0, "recovery": 2.0,
-                  "aerial_defense": 6.0}
+                  "aerial_defense": 6.0, "air": 3.0, "reset": 3.0}
 NO_GOAL_DRILLS = ("defense", "aerial_defense")   # réussite = aucun but encaissé dans la fenêtre
+AIR_TOUCH_Z = 300.0                             # exercice de vol : touche au-dessus de cette hauteur
 AERIAL_TOUCH_Z = 400.0                          # exercice aérien sans niveau (s6)
 AERIAL_TOUCH_Z_LEVEL = (200.0, 700.0)           # avec niveau : hauteur de touche exigée au niveau 0 → 1
 AERIAL_MIN_Z = 220.0                            # touche « aérienne » : voiture en l'air, balle au-dessus
@@ -75,6 +76,7 @@ class EpisodeTracker:
         self.spoils = 0
         self.true_aerials = 0
         self.wall_aerials = 0
+        self.flip_resets = 0
         self.air_boost_ticks: Dict[Any, int] = {}
         self.takeoff_z: Dict[Any, float] = {}
         # mécaniques (toutes les voitures) : sommes sur (voitures × steps)
@@ -94,10 +96,12 @@ class EpisodeTracker:
         self.bumps = 0
         self.prev_victim: Dict[Any, Any] = {}
         self.prev_car: Dict[Any, tuple] = {}
+        self.prev_ground: Dict[Any, bool] = {}
         self.prev_ball = None
         if state is not None:
             self.prev_car = {a: (float(c.boost_amount), bool(c.has_jumped), float(c.demo_respawn_timer),
                                  bool(c.has_flipped)) for a, c in state.cars.items()}
+            self.prev_ground = {a: bool(c.on_ground) for a, c in state.cars.items()}
             self.prev_ball = (state.ball.position.tolist(), state.ball.linear_velocity.tolist())
         # exercice
         kind = str(self.start_kind)
@@ -118,9 +122,13 @@ class EpisodeTracker:
                 self.takeoff_z[a] = float(car.physics.position[2])
             elif car.is_boosting:
                 self.air_boost_ticks[a] = self.air_boost_ticks.get(a, 0) + dt_ticks
+            prev_ground = self.prev_ground.get(a, True)
+            self.prev_ground[a] = bool(car.on_ground)
             if car.ball_touches > 0:
                 self.touches[car.team_num] = self.touches.get(car.team_num, 0) + 1
                 touch_teams.add(car.team_num)
+                prev = self.prev_car.get(a)
+                self.flip_resets += is_flip_reset(car, state.ball.position, prev_ground, bool(prev and prev[1]))
                 if state.ball.position[2] > 300:
                     self.air_touches += 1
                 if not car.on_ground and state.ball.position[2] > AERIAL_MIN_Z:
@@ -230,6 +238,10 @@ class EpisodeTracker:
         elif kind == "aerial":
             ok = (any(c.ball_touches > 0 for c in mine)
                   and float(state.ball.position[2]) > aerial_drill_min_z(self.drill_level))
+        elif kind == "air":
+            ok = any(c.ball_touches > 0 for c in mine) and float(state.ball.position[2]) > AIR_TOUCH_Z
+        elif kind == "reset":
+            ok = self.flip_resets > 0
         elif kind == "wall":
             ball = state.ball.position
             ok = any(c.ball_touches > 0 for c in mine) and (abs(float(ball[0])) > WALL_ZONE_X or float(ball[2]) > 300)
@@ -259,6 +271,7 @@ class EpisodeTracker:
             "spoils_per_min": self.spoils / minutes,
             "true_aerials_per_min": self.true_aerials / minutes,
             "wall_aerials_per_min": self.wall_aerials / minutes,
+            "flip_resets_per_min": self.flip_resets / minutes,
             "kickoff_winner": self.kickoff_winner,
         }
         if self.car_steps > 0:

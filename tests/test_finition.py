@@ -225,8 +225,7 @@ def test_finition_stage_keeps_the_rush_dna():
     """Le PO y tient : le palier ne doit rien retirer de ce qui fait le jeu agressif de l'agent."""
     cfg = load_config(["kaggle_tpu", "s10"])
     c = SkillCurriculum.from_cfg(cfg)
-    assert c.names[-2:] == ["precision", "finition"]
-    w4, w5 = c.stage_weights[-2], c.stage_weights[-1]
+    w4, w5 = c.stage_weights[c.names.index("precision")], c.stage_weights[c.names.index("finition")]
     for term in ("vel_player_to_ball", "flip_speed", "demo", "bump", "goal", "vel_ball_to_goal", "shot"):
         assert w5[term] == w4[term], term
     assert w5["boost_keep"] == w4["boost_keep"] and cfg["rewards"]["boost_loss_coef"] == 0.0   # dépenser reste gratuit
@@ -252,7 +251,7 @@ def test_aerial_drill_stays_where_flying_pays():
     from rlagent.train import DrillCurriculum
     cfg = load_config(["kaggle_tpu", "s10"])
     dc = DrillCurriculum.from_cfg(cfg)
-    assert set(dc.levels) == {"aerial", "shot"}
+    assert {"aerial", "shot"} <= set(dc.levels)
     for _ in range(200):
         dc.update([{"drill": "aerial", "drill_level": dc.levels["aerial"], "drill_success": 0.0}])
     assert dc.levels["aerial"] == dc.min_level == 0.4

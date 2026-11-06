@@ -11,7 +11,7 @@ from rlgym.rocket_league import common_values as cv
 from rlgym.rocket_league.api import GameState
 from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, KickoffMutator
 
-from .common import unit
+from .common import norm3, unit
 
 
 def _weighted_choice(weights: Dict[Any, float], rng: random.Random):
@@ -307,6 +307,89 @@ class AerialDrill(_Drill):
         self.last_meet = (mx, my, h, T)                                 # tests / diagnostic
 
 
+class AirDrill(_Drill):
+    """Voiture déjà en vol vers une balle haute : curriculum INVERSÉ (palier 6). Le rendez-vous (`aerial`) plafonne à 3,7 %
+    de réussite : décoller au bon moment, monter et viser d'un coup, c'est trop. Ici on part de la fin du geste et on
+    recule avec le niveau, jusqu'au décollage :
+        0 : voiture à 300-700 uu sous la balle, lancée vers elle, nez pointé dessus, 60-100 de boost ;
+        1 : voiture à 1200-2400 uu, à 50-300 uu de haut, mal orientée, balle qui file, 30-100 de boost.
+    Voiture plutôt de notre côté de la balle : la frappe part vers le but adverse. Réussite : metrics/episode.py (touche
+    au-dessus de 300 uu en 3 s). La balle garde toujours un peu de vitesse : immobile, elle resterait suspendue."""
+    kind = "air"
+    leveled = True
+
+    def setup(self, state, team, r):
+        car = _team_cars(state, team)[0]
+        d = _dir(team)
+        L = 0.5 if self.level is None else self.level
+        ball = np.array([r.uniform(-3000, 3000), d * r.uniform(-1500, 4200),
+                         r.uniform(_lerp(500, 450, L), _lerp(1100, 1800, L))])
+        dist = r.uniform(_lerp(300, 1200, L), _lerp(700, 2400, L))
+        z = _lerp(ball[2] - r.uniform(150, 450), r.uniform(50, 300), L)
+        flat = math.sqrt(max(dist * dist - (ball[2] - z) ** 2, 0.0))
+        side = r.normal(0.0, _lerp(0.5, 1.2, L))
+        pos = np.array([np.clip(ball[0] - flat * math.sin(side), -3900, 3900),
+                        np.clip(ball[1] - d * flat * math.cos(side), -4900, 4900), max(z, 50.0)])
+        to_ball = unit(ball - pos)
+        fwd = unit(to_ball + r.normal(0.0, _lerp(0.05, 0.8, L), 3))
+        speed = r.uniform(_lerp(700, 300, L), _lerp(1300, 1200, L))
+        sigma = _lerp(100, 700, L)
+        state.ball.position = ball.astype(np.float32)
+        state.ball.linear_velocity = np.array([r.normal(0, sigma), r.normal(0, sigma), r.uniform(50, 300)], dtype=np.float32)
+        state.ball.angular_velocity = np.zeros(3, dtype=np.float32)
+        car.physics.position = pos.astype(np.float32)
+        car.physics.linear_velocity = (to_ball * speed).astype(np.float32)
+        car.physics.angular_velocity = np.zeros(3, dtype=np.float32)
+        car.physics.euler_angles = np.array([math.asin(float(np.clip(fwd[2], -1.0, 1.0))), math.atan2(fwd[1], fwd[0]),
+                                             r.normal(0.0, _lerp(0.1, 1.0, L))], dtype=np.float32)
+        car.boost_amount = float(r.uniform(_lerp(60, 30, L), 100))
+        car.on_ground = False
+        car.has_jumped = True
+        car.has_double_jumped = False
+        car.has_flipped = False
+        self.last_flight = (ball, pos, fwd)                              # tests / diagnostic
+
+
+class ResetDrill(_Drill):
+    """Roues face à une balle haute, flip déjà utilisé : le flip reset à portée (palier 6). Les bots ne le découvrent pas
+    seuls : sans états où il est possible, le reward ne se déclenche presque jamais (Opti a ses états et son modèle dédiés).
+        0 : voiture à 130-260 uu de la balle, roues bien en face, vitesse relative 200-500 uu/s ;
+        1 : voiture à 300-900 uu, orientation approximative, approche plus rapide.
+    Voiture plutôt sous la balle et de notre côté : le flip regagné part vers le but adverse. Réussite : metrics/episode.py
+    (un flip reset en 3 s). `flip_time` élevé : sinon RocketSim croit le flip en cours et amortit la chute."""
+    kind = "reset"
+    leveled = True
+
+    def setup(self, state, team, r):
+        car = _team_cars(state, team)[0]
+        d = _dir(team)
+        L = 0.5 if self.level is None else self.level
+        ball = np.array([r.uniform(-2800, 2800), d * r.uniform(-1500, 4000), r.uniform(700, 1500)])
+        azimuth, elevation = r.normal(0.0, 0.8), r.uniform(-0.5, 1.3)
+        to_ball = np.array([math.sin(azimuth) * math.cos(elevation), d * math.cos(azimuth) * math.cos(elevation),
+                            math.sin(elevation)])
+        pos = ball - to_ball * r.uniform(_lerp(130, 300, L), _lerp(260, 900, L))
+        up = unit(-to_ball + r.normal(0.0, _lerp(0.03, 0.35, L), 3))
+        attack = np.array([0.0, d, 0.0])
+        fwd = attack - up * float(np.dot(attack, up))
+        fwd = unit(fwd) if norm3(fwd) > 1e-3 else unit(np.cross(up, [1.0, 0.0, 0.0]))
+        ball_vel = np.array([r.normal(0, 150), r.normal(0, 150), r.uniform(50, 250)])
+        state.ball.position = ball.astype(np.float32)
+        state.ball.linear_velocity = ball_vel.astype(np.float32)
+        state.ball.angular_velocity = np.zeros(3, dtype=np.float32)
+        car.physics.position = pos.astype(np.float32)
+        car.physics.linear_velocity = (ball_vel + to_ball * r.uniform(_lerp(200, 300, L), _lerp(500, 900, L))).astype(np.float32)
+        car.physics.angular_velocity = np.zeros(3, dtype=np.float32)
+        car.physics.rotation_mtx = np.column_stack([fwd, np.cross(up, fwd), up]).astype(np.float32)
+        car.boost_amount = float(r.uniform(30, 100))
+        car.on_ground = False
+        car.has_jumped = True
+        car.has_double_jumped = False
+        car.has_flipped = True
+        car.flip_time = 1.0
+        car.air_time_since_jump = 2.0
+
+
 class AerialDefenseDrill(_Drill):
     """Lob adverse qui retombe DANS notre but : l'intercepter en l'air (ou au rebond) avant la ligne.
     Réussite : pas de but encaissé en 6 s (metrics/episode.py).
@@ -443,7 +526,7 @@ class RecoveryDrill(_Drill):
 
 
 DRILLS = {cls.kind: cls for cls in (DefenseDrill, ShotDrill, AerialDrill, WallDrill, LowBoostDrill, RecoveryDrill,
-                                    AerialDefenseDrill)}
+                                    AerialDefenseDrill, AirDrill, ResetDrill)}
 LEVELED_DRILLS = tuple(k for k, cls in DRILLS.items() if cls.leveled)
 
 
