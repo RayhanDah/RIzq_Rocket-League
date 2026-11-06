@@ -2,7 +2,7 @@
 # Configuration RLBot v5 — format vérifié le 12/10/2026 avec https://wiki.rlbot.org/v5/botmaking/config-files/
 [settings]
 agent_id = "ensisa/rlagent/v0.1"
-name = "RLAgent"
+name = "Rizq v1"
 # run_command est lancé depuis ce dossier (bot/). Venv dédié au bot : rlgym-rlbot + torch + rlagent
 # (voir INSTALL.md §8) ; il est séparé du venv d'entraînement car rlgym-rlbot impose ses propres versions.
 run_command = "..\\.venv-bot\\Scripts\\python.exe bot.py"
