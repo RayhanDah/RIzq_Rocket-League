@@ -2,6 +2,7 @@
 
 Réutilise EXACTEMENT les mêmes AttentionObs et action parser qu'à l'entraînement (ARCHITECTURE §12).
 Le modèle est lu dans bot/model.pt, produit par :  python scripts/export_bot.py --run runs/<run>
+ou dans le fichier passé en argument (relatif à bot/), pour faire jouer une autre version : voir agent_v*.toml.
 
 ⚠️ Hors ligne uniquement (RLBot). Jamais en ranked.
 """
@@ -49,7 +50,7 @@ class Agent:
 class RLAgentBot(RLGymBot):
     def __init__(self):
         # argmax : mêmes poids, sans le bruit de l'échantillonnage (s10, 04/11 : 24-8-8 contre la version échantillonnée)
-        self.agent = Agent(HERE / "model.pt", deterministic=True)
+        self.agent = Agent(HERE / (sys.argv[1] if len(sys.argv) > 1 else "model.pt"), deterministic=True)
         super().__init__(
             obs_builder=AttentionObs(ball_prediction=self.agent.ball_prediction,
                                      race_features=self.agent.race_features,
