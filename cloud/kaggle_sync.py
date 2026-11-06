@@ -5,7 +5,7 @@
         --init runs/s7e_spo_laptop --anchors-from s7 s7b s7c s7d s7e s7f  # 1re session d'un run (démarrage à chaud)
     python cloud/kaggle_sync.py launch --run-name s7f_spo_kaggle         # sessions suivantes : reprise automatique
     python cloud/kaggle_sync.py status --run-name s7f_spo_kaggle
-    python cloud/kaggle_sync.py fetch  --run-name s7f_spo_kaggle --wait  # attend la fin puis copie dans runs/
+    python cloud/kaggle_sync.py fetch  --run-name s7f_spo_kaggle --wait  # attend la fin puis rapatrie dans runs/
 
 Un notebook Kaggle privé par run (« rl-agent <run> »), généré depuis cloud/kaggle_train.ipynb :
   - le code (même contenu que dist/rl-agent-code.zip) est EMBARQUÉ dans le notebook : plus de dataset de code à mettre à
@@ -43,6 +43,8 @@ INIT_DATASET = "rl-agent-init"
 # machine_shape de Kaggle (kernel-metadata.json) : « GPU T4 x2 » et « TPU v5e-8 »
 ACCELERATORS = {"gpu": "NvidiaTeslaT4", "tpu": "TpuV5E8", "none": None}
 MAX_EMBEDDED = 900_000                             # octets de base64 : au-delà, le notebook devient trop lourd
+POOL_EVERY = 100_000_000                           # fetch : une version du pool tous les 100 M steps…
+POOL_RECENT = 20                                   # … plus les dernières (selfplay.pool_recent)
 
 
 def api():
@@ -325,6 +327,48 @@ def download_output(k, ref: str, dest: Path, file_pattern=None, attempts: int = 
     return []
 
 
+def output_files(k, ref: str) -> list:
+    """Noms des fichiers de l'Output d'une session, sans rien télécharger."""
+    from kagglesdk.kernels.types.kernels_api_service import ApiListKernelSessionOutputRequest
+
+    owner, slug = ref.split("/")
+    names, token = [], None
+    with k.build_kaggle_client() as client:
+        while True:
+            req = ApiListKernelSessionOutputRequest()
+            req.user_name, req.kernel_slug, req.page_size = owner, slug, 500
+            if token:
+                req.page_token = token
+            resp = client.kernels.kernels_api_client.list_kernel_session_output(req)
+            names += [f.file_name for f in resp.files]
+            token = resp.next_page_token
+            if not token:
+                return names
+
+
+def fetch_pattern(names: list, run_name: str) -> str:
+    """Filtre de `fetch` : tout runs/<run>, sauf le pool (95 % de l'Output, 1 requête par fichier : ~2 h à 1 600 versions).
+    On garde une version tous les POOL_EVERY steps et les POOL_RECENT dernières : l'entraînement ne tire ses adversaires
+    que là, sans elles une reprise locale ou un --init jouerait contre de très vieilles versions. Le reste du pool ne
+    sert pas sur le portable, et il reste dans l'Output Kaggle (--full-pool pour tout rapatrier)."""
+    run = re.escape(run_name)
+    steps = sorted(int(m.group(1)) for n in names if (m := re.fullmatch(rf"runs/{run}/pool/actor_(\d+)\.pt", n)))
+    first_of_bucket = {}
+    for step in steps:
+        first_of_bucket.setdefault(step // POOL_EVERY, step)
+    ids = "|".join(f"{s:013d}" for s in sorted({*first_of_bucket.values(), *steps[-POOL_RECENT:]}))
+    return rf"^runs/{run}(\.log$|/(?!pool/actor_)|/pool/actor_({ids})\.pt$)"
+
+
+def move_tree(src: Path, target: Path) -> None:
+    """Déplace src dans target fichier par fichier : même disque, donc rien n'est recopié et le run n'existe pas en double
+    dans dist/. Écrase les fichiers de même nom, ne touche pas aux autres (RAPPORT.md, versions du pool déjà là)."""
+    for f in [p for p in src.rglob("*") if p.is_file()]:
+        out = target / f.relative_to(src)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        f.replace(out)
+
+
 def cmd_fetch(args) -> None:
     k = api()
     _, ref = kernel_ref(k, args.run_name)
@@ -352,7 +396,8 @@ def cmd_fetch(args) -> None:
 
     dest = WORK / "output" / args.run_name
     shutil.rmtree(dest, ignore_errors=True)
-    pattern = rf"^runs/{re.escape(args.run_name)}(/|\.log$)"
+    pattern = (rf"^runs/{re.escape(args.run_name)}(/|\.log$)" if args.full_pool
+               else fetch_pattern(output_files(k, ref), args.run_name))
     files = download_output(k, ref, dest, file_pattern=pattern)
     found = sorted(dest.rglob(f"runs/{args.run_name}/latest.txt"))
     if not found:
@@ -371,10 +416,10 @@ def cmd_fetch(args) -> None:
         if local > remote:
             sys.exit(f"runs/{args.run_name} local est plus avancé ({local} itérations contre {remote} sur Kaggle) : "
                      f"rien copié (--force pour écraser). Téléchargement gardé dans {src}")
-    shutil.copytree(src, target, dirs_exist_ok=True)
+    move_tree(src, target)
     for log in dest.rglob(f"{args.run_name}.log"):
         shutil.copy2(log, ROOT / "runs" / log.name)
-    print(f"[kaggle] run copié dans {target} ({(target / 'latest.txt').read_text().strip()})")
+    print(f"[kaggle] run rapatrié dans {target} ({(target / 'latest.txt').read_text().strip()})")
 
 
 def main() -> None:
@@ -411,11 +456,12 @@ def main() -> None:
     p.add_argument("--run-name", required=True)
     p.set_defaults(func=cmd_status)
 
-    p = sub.add_parser("fetch", help="télécharge l'Output et copie runs/<run> sur le portable")
+    p = sub.add_parser("fetch", help="télécharge l'Output et range runs/<run> sur le portable")
     p.add_argument("--run-name", required=True)
     p.add_argument("--wait", action="store_true", help="attendre la fin de la session")
     p.add_argument("--poll", type=int, default=300, help="secondes entre deux vérifications (--wait)")
     p.add_argument("--force", action="store_true", help="écraser même si le run local est plus avancé")
+    p.add_argument("--full-pool", action="store_true", help="tout le pool, pas seulement 1 version / 100 M + les 20 dernières")
     p.set_defaults(func=cmd_fetch)
 
     args = ap.parse_args()

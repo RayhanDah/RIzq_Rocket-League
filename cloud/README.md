@@ -68,13 +68,18 @@ toujours sur Kaggle (navigateur fermé), mais c'est le portable qui l'envoie, le
 .venv\Scripts\python cloud/kaggle_sync.py launch --run-name s7f_spo_kaggle --init runs/s7e_spo_laptop --anchors-from s7 s7b s7c s7d s7e s7f
 # sessions suivantes : reprise automatique là où la précédente s'est arrêtée
 .venv\Scripts\python cloud/kaggle_sync.py launch --run-name s7f_spo_kaggle
-# attendre la fin puis copier le run dans runs/s7f_spo_kaggle (+ runs/s7f_spo_kaggle.log)
+# attendre la fin puis rapatrier le run dans runs/s7f_spo_kaggle (+ runs/s7f_spo_kaggle.log)
 .venv\Scripts\python cloud/kaggle_sync.py fetch --run-name s7f_spo_kaggle --wait
 ```
 Options de `launch` : `--accelerator gpu|tpu|none` (défaut `gpu` = T4 x2), `--profiles s7 s7b ...` (défaut
 `s7 s7b s7c s7d s7e s7f`), `--mode bench`, `--hours 6`, `--no-autotune`, `--fresh` (ne pas reprendre l'Output
 précédent), `--dry-run` (prépare le notebook dans `dist/kaggle/kernels/<run>/` sans rien envoyer, sans jeton).
 `status --run-name <run>` : état de la session.
+
+`fetch` rapatrie tout le run sauf le pool, dont il ne prend qu'une version tous les 100 M steps et les 20 dernières
+(celles que l'entraînement tire comme adversaires). Le reste ne sert pas sur le portable, la reprise se fait depuis
+l'Output Kaggle : `--full-pool` pour tout récupérer (~5 Go et ~2 h à 1 600 versions). Le run est déplacé de `dist/` vers
+`runs/`, il n'est pas stocké en double.
 
 Ce que ça fait :
 - un notebook **privé** par run, « rl-agent <run> », généré depuis `cloud/kaggle_train.ipynb` avec ces réglages ;
