@@ -318,11 +318,15 @@ def download_output(k, ref: str, dest: Path, file_pattern=None, attempts: int = 
         except Exception as err:  # noqa: BLE001 — requests / urllib3 : ChunkedEncodingError, ConnectionError…
             if attempt == attempts:
                 raise
-            partial = max((p for p in dest.rglob("*") if p.is_file()), key=lambda p: p.stat().st_mtime, default=None)
-            if partial is not None:
-                partial.unlink()
+            # le plus récent est le fichier tronqué ; à égalité de date (résolution du système de fichiers), on retire
+            # tous les ex aequo : un fichier complet retiré sera simplement retéléchargé
+            found = [(p.stat().st_mtime_ns, p) for p in dest.rglob("*") if p.is_file()]
+            newest = max((t for t, _ in found), default=None)
+            partial = [p for t, p in found if t == newest]
+            for p in partial:
+                p.unlink()
             print(f"[kaggle] téléchargement coupé ({type(err).__name__}), essai {attempt + 1}/{attempts} dans "
-                  f"{pause:.0f} s (fichier tronqué retiré : {partial.name if partial else '-'})", flush=True)
+                  f"{pause:.0f} s (fichier tronqué retiré : {', '.join(p.name for p in partial) or '-'})", flush=True)
             time.sleep(pause)
     return []
 
