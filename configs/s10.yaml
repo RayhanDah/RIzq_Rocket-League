@@ -10,6 +10,17 @@
 train:
   init_from: null                  # de zéro
   total_steps: 100_000_000_000     # default.yaml : 10 G, atteint en plein milieu de la session 4 (8,14 G au départ)
+  # Session 5 (08/11) : la session 4 a dérivé à partir de 8,7 G (jonglage payé par aerial_touch). On repart de v8400,
+  # la meilleure version mesurée ; les versions plus récentes quittent le pool (pool/rejected/). Une seule fois par run.
+  rollback_to: pool/actor_0008400059217.pt
+  rollback_critic_warmup_iters: 50 # le critique de 10,88 G a appris les valeurs du jonglage : recalé, acteur figé
+  # Jalons complets (acteur + critique + optimiseur) hors rotation, pour que le garde-fou ait où revenir.
+  milestone_every_steps: 250_000_000
+  keep_milestones: 8
+  # Garde-fou (guard.py) : dérive maintenue 60 itérations (~24 M steps) → retour au meilleur jalon, terme fautif coupé.
+  # Session 4 rejouée : ladder/drop passe 120 vers 8,85 G, retour au jalon de 8,5 G au lieu de 2 G steps perdus.
+  guard: {enabled: true, max_drop: 120.0, max_share: 0.25, min_entropy: 1.5, patience: 60, warmup_iters: 100,
+          max_rollbacks: 2}
 env:
   # 1v1 uniquement : le match se joue en 1v1 (README) ; 2v2/3v3 plus tard. Les profils FUSIONNENT les dictionnaires :
   # 2 et 3 doivent être mis à 0 explicitement (sinon ceux de default.yaml restent).
@@ -18,8 +29,9 @@ env:
   # Palier 6 : Necto ne démarrait que 8 % de ses épisodes par un kickoff (70 % depuis des replays, surtout aériens). Faute
   # de replays, on varie les situations. `drill_air` : le vol à partir de la fin du geste (l'exercice `aerial` plafonne à
   # 3,7 %). `drill_reset` : roues face à la balle, pour que le reward `flip_reset` puisse se déclencher.
-  start_weights: {kickoff: 0.3, random: 0.15, aerial: 0.05, attack_defense: 0.05, drill_air: 0.15, drill_reset: 0.05,
-                  drill_aerial: 0.05, drill_shot: 0.05, drill_wall: 0.05, drill_low_boost: 0.05, drill_aerial_defense: 0.05}
+  # 08/11 : `drill_aerial` retiré (0 % de réussite sur toute la session 4, 3,7 % sur la 3), ses 5 % vont au jeu libre.
+  start_weights: {kickoff: 0.3, random: 0.2, aerial: 0.05, attack_defense: 0.05, drill_air: 0.15, drill_reset: 0.05,
+                  drill_aerial: 0.0, drill_shot: 0.05, drill_wall: 0.05, drill_low_boost: 0.05, drill_aerial_defense: 0.05}
   # Plancher 0,4 de l'aérien : balles à 580-890 uu, au-dessus du seuil des rewards aériens et hors de portée d'un simple
   # saut. Vol et reset partent de 0 (leur niveau mesure justement le recul par rapport au geste).
   drill_curriculum: {enabled: true, start: 0.4, min_level: 0.4, step: 0.005, promote: 0.6, demote: 0.3,
@@ -68,6 +80,15 @@ rewards:
   aerial_min_z: 500.0              # aerial_touch : balle au-dessus de 500 uu (220 avant : une touche en sautant suffisait)
   aerial_min_air_boost_s: 0.25     # et boost en l'air depuis le décollage (86 % des touches payées : sauts depuis un mur)
   air_approach_boost_only: true    # air_approach paie le vol boosté, plus les sauts et flips vers une balle haute
+  # 08/11, après la session 4 (jonglage payé ~30 / s contre 10 pour un but, Elo 916 → 270 à partir de 8,7 G) : chaque
+  # compétence aérienne est payée une fois par vol, selon ce qu'elle apporte. Bornes vérifiées par tests/test_exploits.py.
+  aerial_useful_speed: 1000.0      # aerial_touch : plein si la touche ajoute 1 000 uu/s vers le but adverse
+  aerial_first_floor: 0.25         # 1re touche du vol : un quart payé quelle que soit la direction
+  aerial_follow: 0.5               # touches suivantes du même vol : × 0,5 à chaque rang, et seulement vers le but
+  air_approach_until_touch: true   # air_approach : plus rien après la 1re touche du vol
+  air_approach_signed: true        # et s'éloigner coûte : l'aller-retour sous la balle ne rapporte rien
+  flip_reset_require_spent: true   # flip reset payé seulement si le saut avait été utilisé (pas en rebondissant)
+  flip_reset_max_per_flight: 3     # 1 + 0,5 + 0,25 : un triple reset est payé, pas un quatrième
   shot_off_target_factor: 0.25     # shot : frappe hors cadre dans le camp adverse payée au quart
   shot_threat_floor: 0.5           # shot_threat : moitié de la valeur dès que la balle est cadrée, le reste à l'approche
   weights:
@@ -127,7 +148,8 @@ curriculum:
     # contact des roues compte comme un retour au sol, il ne paie pas `aerial_touch` (~4 pour une touche du nez à 1 000 uu).
     - name: maitrise
       rewards: {boost_spend: 0.5, in_air: 0.002, flip_speed: 0.1, kickoff_rush: 0.05, flip_reset: 5.0}
-      ppo: {ent_coef: 0.003}       # 2,67 nats à 8,14 G : le guide RLGym vise ~2
+      # 0,003 en session 4 : entropie 2,65 → 2,1 en 750 M avant la faille, puis 1,13. Retour à la valeur du palier 5.
+      ppo: {ent_coef: 0.005}
 selfplay:
   hist_prob: 0.25
   pool_every_steps: 5_000_000
@@ -137,6 +159,7 @@ selfplay:
   ladder_fit_every: 20             # itérations entre deux calculs de l'échelle (coût en n², ~1 600 versions au départ)
   # s6 : repère de l'échelle. Les autres : styles différents et forts, le pool récent ne couvre que 100 M steps et les
   # résultats ne sont pas transitifs (v6800 bat v7000 24-6, 8,14 G bat v6800 20-8). v8100 = le bot actuel.
+  # v8400 : point de départ de la session 5 (meilleure version mesurée, 59-1-0 et 41-6-13 contre v8100).
   anchors: [runs/s6_spo_kaggle, pool/actor_0005315235148.pt, pool/actor_0006800183709.pt, pool/actor_0007000329112.pt,
-            pool/actor_0007565061406.pt, pool/actor_0008100114172.pt]
+            pool/actor_0007565061406.pt, pool/actor_0008100114172.pt, pool/actor_0008400059217.pt]
   anchor_prob: 0.5                 # 12,5 % des épisodes

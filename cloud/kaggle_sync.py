@@ -350,14 +350,15 @@ def fetch_pattern(names: list, run_name: str) -> str:
     """Filtre de `fetch` : tout runs/<run>, sauf le pool (95 % de l'Output, 1 requête par fichier : ~2 h à 1 600 versions).
     On garde une version tous les POOL_EVERY steps et les POOL_RECENT dernières : l'entraînement ne tire ses adversaires
     que là, sans elles une reprise locale ou un --init jouerait contre de très vieilles versions. Le reste du pool ne
-    sert pas sur le portable, et il reste dans l'Output Kaggle (--full-pool pour tout rapatrier)."""
+    sert pas sur le portable, et il reste dans l'Output Kaggle (--full-pool pour tout rapatrier). Les versions écartées
+    par un retour en arrière (pool/rejected/, train.rollback_to et garde-fou) restent aussi sur Kaggle."""
     run = re.escape(run_name)
     steps = sorted(int(m.group(1)) for n in names if (m := re.fullmatch(rf"runs/{run}/pool/actor_(\d+)\.pt", n)))
     first_of_bucket = {}
     for step in steps:
         first_of_bucket.setdefault(step // POOL_EVERY, step)
     ids = "|".join(f"{s:013d}" for s in sorted({*first_of_bucket.values(), *steps[-POOL_RECENT:]}))
-    return rf"^runs/{run}(\.log$|/(?!pool/actor_)|/pool/actor_({ids})\.pt$)"
+    return rf"^runs/{run}(\.log$|/(?!pool/actor_|pool/rejected/)|/pool/actor_({ids})\.pt$)"
 
 
 def move_tree(src: Path, target: Path) -> None:
@@ -442,7 +443,7 @@ def main() -> None:
                    help="réglages d'apprentissage (configs/*.yaml), dans l'ordre")
     p.add_argument("--accelerator", choices=sorted(ACCELERATORS), default="gpu", help="gpu = T4 x2, tpu = v5e-8")
     p.add_argument("--mode", choices=["train", "bench"], default="train")
-    p.add_argument("--hours", default="auto", help='"auto" (11 h GPU, 8 h TPU) ou un nombre d\'heures')
+    p.add_argument("--hours", default="auto", help='"auto" (arrêt 20 min avant la limite : 12 h GPU, 9 h TPU) ou un nombre d\'heures')
     p.add_argument("--no-autotune", action="store_true", help="pas de mesures en début de session (profils seuls)")
     p.add_argument("--init", default=None, help="run local de départ (dernier checkpoint + pool) → dataset rl-agent-init")
     p.add_argument("--anchors-from", nargs="+", default=None, metavar="PROFIL",

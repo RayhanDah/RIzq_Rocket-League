@@ -46,7 +46,7 @@ s'en passer (profils seuls).
 | Session | 12 h, **tourne navigateur fermé** | 9 h (à vérifier) | ~12 h, onglet ouvert |
 | CPU pour jouer | 4 vCPU → 4 workers locaux | beaucoup (mesuré au lancement) | 2 vCPU |
 | Apprentissage | T4 n°1 | TPU (torch_xla 2.9) ; repli CPU automatique | T4 |
-| Arrêt propre (`HOURS = "auto"`) | après 11 h | après 8 h | 11 h |
+| Arrêt propre (`HOURS = "auto"`) | 11 h 40 après le début de session | 8 h 40 après le début de session | 11 h |
 
 ---
 
@@ -184,8 +184,10 @@ l'entraînement sur le portable avec le même `--run-name`.
    `torch_xla[tpu]` 2.9.0 (même version, `XLA_VERSION`). Puis RLGym, RocketSim (roue Linux) et le package.
 3. Vérifie que l'accélérateur calcule vraiment (sinon apprentissage sur CPU, avec un message).
 4. Reprend le run s'il a un checkpoint, sinon démarrage à chaud depuis `ckpt.pt` (+ copie du pool).
-5. `AUTOTUNE=1` : `scripts/autotune.py` → `runs/<run>/autotune.yaml`. `MODE=bench` : s'arrête là.
-6. Entraîne, arrêt propre après `HOURS` heures.
+5. `AUTOTUNE=1` : `scripts/autotune.py` → `runs/<run>/autotune.yaml`, réutilisé sans mesurer si la session
+   précédente a mesuré la même machine et le même lot. `MODE=bench` : mesure toujours, puis s'arrête là.
+6. Entraîne. `HOURS = "auto"` : arrêt propre 20 min (`MARGIN_MIN`) avant la limite Kaggle (9 h TPU, 12 h GPU),
+   comptée depuis la 1re cellule du notebook (`KERNEL_T0`) ; un nombre = heures d'entraînement.
 
 ## 5. Réglages à la main (sans autoréglage)
 

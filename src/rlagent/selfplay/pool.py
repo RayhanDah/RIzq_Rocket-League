@@ -136,6 +136,27 @@ class OpponentPool:
             self.entries = sorted(self.entries + [entry], key=lambda e: e["step"])
         return entry["id"]
 
+    def reject_after(self, step: int) -> List[str]:
+        """Retour en arrière (train.rollback_to, garde-fou) : les versions postérieures à `step` quittent le pool, rangées
+        dans pool/rejected/ (rien n'est supprimé), avec leurs scores PFSP. Sans cela, les 20 versions récentes tirées comme
+        adversaires seraient celles de la dérive. Renvoie leurs ids."""
+        with self._lock:
+            gone = [e for e in self.entries if e["step"] > step]
+            self.entries = [e for e in self.entries if e["step"] <= step]
+            for e in gone:
+                self.stats.pop(e["id"], None)
+                self._cache.pop(e["id"], None)
+        if gone:
+            out = self.dir / "rejected"
+            out.mkdir(exist_ok=True)
+            for e in gone:
+                src = Path(e["path"])
+                if src.exists():
+                    src.replace(out / src.name)
+            if self.track:
+                self.save_stats()
+        return [e["id"] for e in gone]
+
     # ------------------------------------------------------------------ ancres
     def _load_anchors(self, specs: Iterable[Union[str, Path]], root: Optional[Path], refrozen: List[str]) -> List[Dict]:
         import torch

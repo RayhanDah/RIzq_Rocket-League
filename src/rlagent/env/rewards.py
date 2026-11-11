@@ -497,38 +497,57 @@ class AerialTouchTerm(RewardTerm):
     pas (roues au contact). Au plus une touche payée par `cooldown_s` et par voiture : un contact prolongé (balle posée
     sur le capot) ne se farme pas step après step. Événement de compétence : ne décroît pas (identité de l'agent).
     `min_air_boost_s` (palier 5) : boost exigé en l'air depuis le décollage. Sans lui, 86 % des touches payées venaient
-    d'un saut depuis un mur, sans boost (audit du 04/11)."""
+    d'un saut depuis un mur, sans boost (audit du 04/11).
+
+    `useful_speed` (08/11, après la session 4) : la touche est payée selon ce qu'elle apporte, g = gain de vitesse de la
+    balle vers le but adverse / `useful_speed` (borné à [0, 1]). 1re touche du vol : `first_floor` + le reste × g ;
+    touches suivantes sans retomber : g × `follow`^k (k = rang dans le vol). Le vol ne se termine qu'au vrai retour au sol
+    (roues au sol ou au mur, pas sur la balle). Sans cette option, le ×1,5 puis ×2 des touches enchaînées payait le
+    jonglage sur place ~30 / s contre 10 pour un but : l'agent l'a trouvé à 8,7 G et a cessé de marquer (Elo 916 → 270).
+    Avec elle, jongler sur place un vol entier rapporte moins d'une 1re touche (tests/test_exploits.py)."""
     name = "aerial_touch"
 
     def __init__(self, min_z: float = 220.0, full_z: float = 1720.0, cooldown_s: float = 0.5,
-                 min_air_boost_s: float = 0.0):
+                 min_air_boost_s: float = 0.0, useful_speed: Optional[float] = None, first_floor: float = 0.25,
+                 follow: float = 0.5):
         self.min_z, self.full_z = float(min_z), float(full_z)
         self.cooldown = int(round(cooldown_s * cv.TICKS_PER_SECOND))
         self.min_air_boost = float(min_air_boost_s) * cv.TICKS_PER_SECOND
+        self.useful_speed = None if useful_speed is None else float(useful_speed)
+        self.first_floor, self.follow = float(first_floor), float(follow)
         self.chain: Dict[str, int] = {}
         self.last_tick: Dict[str, int] = {}
         self.air_boost: Dict[str, int] = {}               # ticks de boost depuis le décollage
         self.prev_tick = 0
+        self.prev_ball_vel = np.zeros(3, dtype=np.float32)
 
     def reset(self, agents, state, shared_info):
         self.chain = {a: 0 for a in agents}
         self.last_tick = {}
         self.air_boost = {a: 0 for a in agents}
         self.prev_tick = int(getattr(state, "tick_count", 0) or 0)
+        self.prev_ball_vel = np.asarray(state.ball.linear_velocity, dtype=np.float32).copy()
 
     def get(self, agents, state, shared_info):
         z = float(state.ball.position[2])
         tick = int(getattr(state, "tick_count", 0) or 0)
         dt_ticks = max(0, tick - self.prev_tick)
         self.prev_tick = tick
+        vel = np.asarray(state.ball.linear_velocity, dtype=np.float32)
+        dv = (vel - self.prev_ball_vel).tolist()
+        self.prev_ball_vel = vel.copy()
+        useful = self.useful_speed is not None
+        ball = state.ball.position.tolist()
         height = min(1.0, max(0.0, (z - self.min_z) / (self.full_z - self.min_z)))
         out = {}
         for a in agents:
             car = state.cars[a]
             out[a] = 0.0
             if car.on_ground:
-                self.chain[a] = 0
-                self.air_boost[a] = 0
+                # roues contre la balle (flip reset) : RocketSim dit « au sol », mais le vol continue (mode useful)
+                if not useful or car.ball_touches <= 0:
+                    self.chain[a] = 0
+                    self.air_boost[a] = 0
                 continue
             if car.is_boosting:
                 self.air_boost[a] = self.air_boost.get(a, 0) + dt_ticks
@@ -538,7 +557,14 @@ class AerialTouchTerm(RewardTerm):
             if last is not None and tick - last < self.cooldown:
                 continue
             k = self.chain.get(a, 0)
-            out[a] = (0.5 + 1.5 * height) * min(1.0 + 0.5 * k, 2.0)
+            base = 0.5 + 1.5 * height
+            if not useful:
+                out[a] = base * min(1.0 + 0.5 * k, 2.0)
+            else:
+                goal = _OPP_GOAL if car.team_num == cv.BLUE_TEAM else _OPP_GOAL_ORANGE
+                g = min(1.0, max(0.0, _dot_dir(dv, ball, goal) / self.useful_speed))
+                share = self.first_floor + (1.0 - self.first_floor) * g if k == 0 else g
+                out[a] = base * share * self.follow ** k
             self.chain[a] = k + 1
             self.last_tick[a] = tick
         return out
@@ -547,17 +573,27 @@ class AerialTouchTerm(RewardTerm):
 class FlipResetTerm(RewardTerm):
     """Flip reset (palier 6, `flip_reset_w` de Necto) : +1 quand les roues touchent la balle en l'air (common.is_flip_reset).
     Les bots ne le découvrent pas seuls (guide RLGym-PPO). `cooldown_s` par voiture : rester posé sur une balle en l'air
-    ne se farme pas contact après contact, enchaîner de vrais resets reste payé."""
+    ne se farme pas contact après contact, enchaîner de vrais resets reste payé.
+
+    Options du 08/11 (revue des boucles après la session 4) : `require_spent` ne paie que si le saut avait été utilisé
+    avant le contact (sinon rebondir sur la balle sans sauter rapportait 5 par seconde) ; `max_per_flight` resets payés
+    par vol, le k-ième valant `follow`^k (un triple reset : 1 + 0,5 + 0,25). Le vol se termine au vrai retour au sol."""
     name = "flip_reset"
 
-    def __init__(self, cooldown_s: float = 1.0):
+    def __init__(self, cooldown_s: float = 1.0, require_spent: bool = False, max_per_flight: Optional[int] = None,
+                 follow: float = 0.5):
         self.cooldown = int(round(cooldown_s * cv.TICKS_PER_SECOND))
+        self.require_spent = bool(require_spent)
+        self.max_per_flight = None if max_per_flight is None else int(max_per_flight)
+        self.follow = float(follow)
         self.prev: Dict[str, Tuple[bool, bool]] = {}
         self.last_tick: Dict[str, int] = {}
+        self.flight: Dict[str, int] = {}                  # resets depuis le dernier vrai retour au sol
 
     def reset(self, agents, state, shared_info):
         self.prev = {a: (bool(state.cars[a].on_ground), bool(state.cars[a].has_jumped)) for a in agents}
         self.last_tick = {}
+        self.flight = {a: 0 for a in agents}
 
     def get(self, agents, state, shared_info):
         tick = int(getattr(state, "tick_count", 0) or 0)
@@ -567,9 +603,17 @@ class FlipResetTerm(RewardTerm):
             ground, jumped = self.prev.get(a, (True, False))
             self.prev[a] = (bool(car.on_ground), bool(car.has_jumped))
             out[a] = 0.0
+            if car.on_ground and car.ball_touches <= 0:
+                self.flight[a] = 0
             last = self.last_tick.get(a)
-            if (last is None or tick - last >= self.cooldown) and is_flip_reset(car, state.ball.position, ground, jumped):
-                out[a] = 1.0
+            if ((last is None or tick - last >= self.cooldown) and (jumped or not self.require_spent)
+                    and is_flip_reset(car, state.ball.position, ground, jumped)):
+                k = self.flight.get(a, 0)
+                if self.max_per_flight is None:
+                    out[a] = 1.0
+                elif k < self.max_per_flight:
+                    out[a] = self.follow ** k
+                self.flight[a] = k + 1
                 self.last_tick[a] = tick
         return out
 
@@ -578,14 +622,30 @@ class AirApproachTerm(RewardTerm):
     """En l'air, balle haute (> `min_z`) : vitesse vers la balle / 2300, pour le 1er homme seulement (plus petite ETA
     de l'équipe). Apprend le contrôle aérien (boost + orientation vers la balle) ; sauter quand la balle est au sol ou
     s'envoler à côté ne rapporte rien. Aide d'apprentissage : à faire décroître.
-    `boost_only` (palier 5) : seulement en boostant, pour payer le vol et plus les sauts et flips vers une balle haute."""
+    `boost_only` (palier 5) : seulement en boostant, pour payer le vol et plus les sauts et flips vers une balle haute.
+    Options du 08/11 (revue des boucles après la session 4) : `until_touch` arrête de payer après la 1re touche du vol
+    (jusqu'au vrai retour au sol) : planer sous la balle en la retouchant ne rapporte plus ; `signed` compte aussi
+    l'éloignement, pour qu'aller-retour vers la balle sans la toucher ne rapporte rien."""
     name = "air_approach"
 
-    def __init__(self, min_z: float = 300.0, boost_only: bool = False):
+    def __init__(self, min_z: float = 300.0, boost_only: bool = False, until_touch: bool = False,
+                 signed: bool = False):
         self.min_z = float(min_z)
         self.boost_only = bool(boost_only)
+        self.until_touch, self.signed = bool(until_touch), bool(signed)
+        self.touched: Dict[str, bool] = {}
+
+    def reset(self, agents, state, shared_info):
+        self.touched = {}
 
     def get(self, agents, state, shared_info):
+        if self.until_touch:
+            for a in agents:
+                car = state.cars[a]
+                if car.on_ground and car.ball_touches <= 0:
+                    self.touched[a] = False
+                elif car.ball_touches > 0:
+                    self.touched[a] = True
         ball = state.ball.position.tolist()
         if ball[2] <= self.min_z:
             return {a: 0.0 for a in agents}
@@ -593,7 +653,7 @@ class AirApproachTerm(RewardTerm):
         out = {}
         for a in agents:
             car = state.cars[a]
-            if car.on_ground or (self.boost_only and not car.is_boosting):
+            if car.on_ground or (self.boost_only and not car.is_boosting) or self.touched.get(a, False):
                 out[a] = 0.0
                 continue
             mine, mate, _ = team_etas(info, state, a)
@@ -601,7 +661,8 @@ class AirApproachTerm(RewardTerm):
                 out[a] = 0.0
                 continue
             p = car.physics
-            out[a] = max(0.0, _dot_dir(p.linear_velocity.tolist(), p.position.tolist(), ball)) / cv.CAR_MAX_SPEED
+            v = _dot_dir(p.linear_velocity.tolist(), p.position.tolist(), ball) / cv.CAR_MAX_SPEED
+            out[a] = v if self.signed else max(0.0, v)
         return out
 
 
@@ -959,8 +1020,12 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         BoostPotential(float(rc.get("boost_potential_gamma", gamma))),
         PositioningPotential(gamma, temperature=rc.get("race_temperature", 0.3),
                              support_p=rc.get("support_defend_p", 0.8)),
-        AerialTouchTerm(min_z=rc.get("aerial_min_z", 220.0), min_air_boost_s=rc.get("aerial_min_air_boost_s", 0.0)),
-        AirApproachTerm(boost_only=rc.get("air_approach_boost_only", False)),
+        AerialTouchTerm(min_z=rc.get("aerial_min_z", 220.0), min_air_boost_s=rc.get("aerial_min_air_boost_s", 0.0),
+                        useful_speed=rc.get("aerial_useful_speed"), first_floor=rc.get("aerial_first_floor", 0.25),
+                        follow=rc.get("aerial_follow", 0.5)),
+        AirApproachTerm(boost_only=rc.get("air_approach_boost_only", False),
+                        until_touch=rc.get("air_approach_until_touch", False),
+                        signed=rc.get("air_approach_signed", False)),
         FlipSpeedTerm(min_speed=rc.get("flip_speed_min_speed", 1000.0)),
         KickoffRushTerm(),
         KickoffWinTerm(),
@@ -974,7 +1039,9 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         ShotThreatPotential(gamma, floor=rc.get("shot_threat_floor", 0.5)),
         # palier 6 « maitrise » (06/11/2026)
         BoostSpendTerm(),
-        FlipResetTerm(cooldown_s=rc.get("flip_reset_cooldown_s", 1.0)),
+        FlipResetTerm(cooldown_s=rc.get("flip_reset_cooldown_s", 1.0),
+                      require_spent=rc.get("flip_reset_require_spent", False),
+                      max_per_flight=rc.get("flip_reset_max_per_flight"), follow=rc.get("flip_reset_follow", 0.5)),
     ]
     stages = (cfg.get("curriculum") or {}).get("stages") or []
     return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0),

@@ -75,6 +75,26 @@ def max_arenas(cfg: Dict[str, Any], batch: int) -> int:
     return max(1, int(batch / (seg * agents_per_arena(cfg))))
 
 
+def reusable(out: Path, ncpu: int, gpus: int, batch: int, learners: Optional[str]) -> Optional[str]:
+    """Résumé du profil `out` s'il a été mesuré sur la même machine pour le même lot (sinon None)."""
+    report = out.with_suffix(".json")
+    if not out.exists() or not report.exists():
+        return None
+    try:
+        rep = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (rep.get("ncpu"), rep.get("gpus"), rep.get("batch")) != (ncpu, gpus, batch):
+        return None
+    learner = str(rep.get("learner", ""))
+    if learner.startswith("xla") and not accel.xla_available():
+        return None
+    if learners and learner not in learners.split(","):
+        return None
+    return f"{rep.get('best')}, apprentissage {learner}, ~{rep.get('expected_sps', 0):,.0f} steps/s, {rep.get('date', '?')[:16]}"
+
+
+
 def default_candidates(cfg: Dict[str, Any], batch: int, ncpu: int) -> List[Candidate]:
     cap = max_arenas(cfg, batch)
     out: List[Candidate] = []
@@ -177,6 +197,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--learner-threads", type=int, default=None)
     ap.add_argument("--skip-learner", action="store_true")
     ap.add_argument("--out", default=None, help="profil YAML à écrire (le rapport JSON est écrit à côté)")
+    ap.add_argument("--reuse", action="store_true",
+                    help="garder --out sans mesurer s'il vient de la même machine (vCPU, GPU) et du même lot")
     args = ap.parse_args(argv)
 
     from rlagent.train import scheduled_batch
@@ -188,6 +210,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"[autotune] {ncpu} vCPU | {gpus} GPU | torch_xla {'oui' if accel.xla_available() else 'non'} | "
           f"lot {batch:,} | arènes max {max_arenas(cfg, batch)} (≥ {cfg['train'].get('min_segment_steps', 32)} "
           f"steps/agent/lot)", flush=True)
+    if args.reuse and args.out:
+        previous = reusable(Path(args.out), ncpu, gpus, batch, args.learner)
+        if previous:
+            print(f"[autotune] mesures de la session précédente réutilisées ({previous}) : {args.out}", flush=True)
+            return
 
     # 1) apprentissage
     updates: Dict[str, float] = {}

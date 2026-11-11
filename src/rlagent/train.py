@@ -36,6 +36,7 @@ from .config import load_config
 from .curriculum import SkillCurriculum
 from .env.actions import N_ACTIONS
 from .env.obs import env_obs_flags, obs_dim
+from .guard import TrainingGuard
 from .models.attention import Actor, actor_from_model_cfg, actor_self_dim, build_models, count_params
 from .selfplay.ladder import Ladder
 from .selfplay.pool import OpponentPool, anchor_name, elo_update
@@ -132,6 +133,51 @@ def save_checkpoint(run_dir: Path, state: Dict[str, Any], keep: int) -> Path:
         except OSError:
             pass
     return path
+
+
+def save_milestone(run_dir: Path, state: Dict[str, Any], keep: int) -> Path:
+    """Jalon (`train.milestone_every_steps`) : checkpoint complet (acteur, critique, optimiseur) gardé à part, hors de la
+    rotation des `keep_checkpoints` derniers. Le garde-fou y revient ; sans eux, après la session 4, seul l'acteur de la
+    meilleure version restait (le pool ne garde pas le critique)."""
+    d = run_dir / "checkpoints" / "milestones"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"ckpt_{state['global_step']:013d}.pt"
+    tmp = path.with_suffix(".tmp")
+    torch.save(state, tmp)
+    tmp.replace(path)
+    for old in sorted(d.glob("ckpt_*.pt"))[:-max(1, keep)]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return path
+
+
+def list_milestones(run_dir: Path) -> List[tuple]:
+    out = []
+    for p in sorted((run_dir / "checkpoints" / "milestones").glob("ckpt_*.pt")):
+        try:
+            out.append((int(p.stem.split("_")[1]), p))
+        except (IndexError, ValueError):
+            pass
+    return out
+
+
+def pick_milestone(run_dir: Path, ladder: Optional[Ladder], before_step: float, window: int = 4) -> Optional[tuple]:
+    """Jalon d'avant la dérive : parmi les `window` derniers antérieurs à `before_step`, celui dont la version du pool la
+    plus proche (au plus son step) est la mieux notée sur l'échelle Elo (la dérive commence avant de franchir un seuil)."""
+    cands = [(s, p) for s, p in list_milestones(run_dir) if s <= before_step][-window:]
+    if not cands:
+        return None
+    if ladder is None or not ladder.ratings:
+        return cands[-1]
+    versions = sorted((st, v) for v, st in ladder.players.items() if st >= 0 and v in ladder.ratings)
+
+    def rating(step: int) -> float:
+        prior = [ladder.ratings[v] for st, v in versions if st <= step]
+        return prior[-1] if prior else float("-inf")
+
+    return max(cands, key=lambda c: (rating(c[0]), c[0]))
 
 
 def find_latest_checkpoint(run_dir: Path) -> Optional[Path]:
@@ -417,6 +463,49 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         ladder.add_version(pool.add({k: v.cpu() for k, v in actor.state_dict().items()}, cfg["model"], 0, elo), 0)
         ladder.save()
 
+    tr_cfg = cfg["train"]
+    guard = TrainingGuard(tr_cfg.get("guard"), run_dir)
+    milestone_every = int(tr_cfg.get("milestone_every_steps") or 0)
+    keep_milestones = int(tr_cfg.get("keep_milestones", 8))
+    critic_warmup = 0          # itérations restantes où seul le critique apprend (après un retour à un acteur seul)
+
+    def reject_after(step: int) -> int:
+        gone = pool.reject_after(step)
+        # l'échelle peut noter des versions absentes du pool (pool partiel rapatrié par kaggle_sync fetch) : elles
+        # sortent aussi, sinon la « dernière version » resterait une version de la dérive (ladder/drop de 664 mesuré)
+        later = [v for v, s in (ladder.players.items() if ladder is not None else []) if s > step]
+        if ladder is not None and (gone or later):
+            ladder.remove(set(gone) | set(later))
+            ladder.fit()
+            ladder.save()
+            save_best_version(run_dir, ladder)
+        return len(gone)
+
+    # Retour à une version du pool demandé par la config (`train.rollback_to`, ex. pool/actor_0008400059217.pt après la
+    # faille de la session 4), une seule fois par run (noté dans guard.json). Le pool ne garde que l'acteur : le critique,
+    # l'optimiseur du critique, les compteurs et le curriculum restent ceux du dernier checkpoint, l'état d'Adam de
+    # l'acteur repart de zéro et le critique se recale seul pendant `rollback_critic_warmup_iters` itérations.
+    spec = tr_cfg.get("rollback_to")
+    if spec and str(spec) not in guard.state.get("manual_rollbacks", []):
+        src = Path(str(spec))
+        src = src if src.is_absolute() else run_dir / src
+        if not src.exists():
+            sys.exit(f"train.rollback_to : {src} introuvable (rien n'a été modifié)")
+        meta = torch.load(src, map_location="cpu", weights_only=False)
+        load_state_expanding(actor, meta["actor"])
+        for prm in actor.parameters():
+            optimizer.state.pop(prm, None)
+        ret_stats.count = min(ret_stats.count, 1e6)       # rewards changés : l'échelle des retours doit s'adapter
+        elo = float(meta.get("elo", elo))
+        n_rej = reject_after(int(meta["global_step"]))
+        critic_warmup = int(tr_cfg.get("rollback_critic_warmup_iters", 50))
+        guard.state.setdefault("manual_rollbacks", []).append(str(spec))
+        guard.save()
+        print(f"[train] retour à {src.name} (step {int(meta['global_step']):,}) : {n_rej} versions plus récentes "
+              f"rangées dans pool/rejected/, critique recalé pendant {critic_warmup} itérations")
+    if guard.disabled_terms:
+        print(f"[train] garde-fou : termes coupés par un retour en arrière précédent : {guard.disabled_terms}")
+
     def apply_stage_ppo() -> None:
         """lr du palier courant du curriculum (curriculum.py), s'il en fixe un."""
         o = {} if skills is None else skills.ppo_overrides()
@@ -463,6 +552,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
     tr, sp = cfg["train"], cfg["selfplay"]
     next_ckpt = (global_step // int(tr["checkpoint_every_steps"]) + 1) * int(tr["checkpoint_every_steps"])
     next_pool = (global_step // int(sp["pool_every_steps"]) + 1) * int(sp["pool_every_steps"])
+    next_milestone = (global_step // milestone_every + 1) * milestone_every if milestone_every > 0 else 0
     poisoned = {"flag": False}
     warn = check_segment_length(cfg, scheduled_batch(cfg, global_step)[0])
     if warn:
@@ -507,7 +597,9 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         if curriculum is not None:
             info["drill_levels"] = dict(curriculum.levels)
         if skills is not None:
-            info["reward_weights"] = skills.weights(global_step)
+            info["reward_weights"] = guard.apply(skills.weights(global_step))
+        elif guard.disabled_terms:
+            info["reward_weights"] = guard.apply(dict(cfg["rewards"]["weights"]))
         if info:
             collector.set_info(info)
 
@@ -515,6 +607,39 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         sync_workers()
         refresh_collect_actor()
         return executor.submit(collector.collect, collect_actor, scheduled_batch(cfg, global_step)[0], collect_device)
+
+    def guard_rollback(trig: Dict[str, Any]) -> bool:
+        """Retour au jalon sain choisi par pick_milestone ; terme fautif coupé. Renvoie False s'il faut s'arrêter (plus
+        de retour permis, ou aucun jalon) ; dans le premier cas, le jalon est quand même rechargé : le checkpoint final
+        et la reprise suivante repartent d'un état sain, pas de la dérive."""
+        nonlocal elo
+        last = not guard.can_roll_back()
+        pick = pick_milestone(run_dir, ladder, float(trig["onset_step"]))
+        if pick is None:
+            print(f"[train] garde-fou : {trig['reason']}, aucun jalon antérieur à {int(trig['onset_step']):,} → arrêt")
+            return False
+        m_step, m_path = pick
+        ck = torch.load(m_path, map_location="cpu" if accel.is_xla(device) else device, weights_only=False)
+        load_state_expanding(actor, ck["actor"])
+        load_state_expanding(critic, ck["critic"])
+        optimizer.load_state_dict(ck["optimizer"])
+        ret_stats.load_state_dict(ck["ret_stats"])
+        elo = float(ck.get("elo", elo))
+        if curriculum is not None and ck.get("curriculum"):
+            curriculum.load_state_dict(ck["curriculum"])
+        if str(cfg["ppo"].get("lr_schedule", "fixed")) != "adaptive_kl":
+            optimizer.param_groups[0]["lr"] = float(cfg["ppo"]["lr_actor"])
+            optimizer.param_groups[1]["lr"] = float(cfg["ppo"]["lr_critic"])
+        apply_stage_ppo()
+        term = trig.get("term") or guard.culprit(guard.reference_shares(m_step))
+        n_rej = reject_after(m_step)
+        guard.record_rollback(global_step, m_step, trig["reason"] + (" (dernier retour permis : arrêt)" if last else ""),
+                              term, n_rej)
+        guard.restart()
+        print(f"[train] garde-fou : {trig['reason']} depuis {int(trig['onset_step']):,} → retour au jalon "
+              f"{m_step:,}, {n_rej} versions écartées" + (f", terme « {term} » coupé" if term else "")
+              + (" ; plus de retour permis : arrêt" if last else ""))
+        return not last
 
     try:
         if async_collect:
@@ -546,8 +671,15 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             upd_cfg = {**cfg, "ppo": {**cfg["ppo"], "minibatch_size": scheduled_batch(cfg, global_step - n)[1],
                                       **stage_ppo}}
             si_before = norms.flat(actor_si)
+            actor_lr = optimizer.param_groups[0]["lr"]
+            if critic_warmup > 0:                  # lr 0 : Adam n'applique aucun pas à l'acteur, ses moments se remplissent
+                optimizer.param_groups[0]["lr"] = 0.0
             stats = ppo_update(actor, critic, optimizer, batch, upd_cfg, device, decoupled=decoupled,
                                after_step=projector)
+            if critic_warmup > 0:
+                optimizer.param_groups[0]["lr"] = actor_lr
+                critic_warmup -= 1
+                stats["critic_warmup"] = 1.0
             stats["lr_actor"] = adapt_actor_lr(optimizer, stats["kl_final"], cfg)
             stats.update(norms.rotation_stats(actor_si, si_before))    # learn/si_norm, learn/si_rot_deg (acteur)
             t_learn = time.perf_counter() - t0
@@ -591,8 +723,31 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                 poisoned["flag"] = True
                 logger.log(metrics)
                 raise FloatingPointError("NaN/Inf dans les pertes : arrêt sans sauvegarde (reprendre au dernier checkpoint)")
-            if iteration % int(tr["log_every_iters"]) == 0:
+            trig = guard.update(metrics) if critic_warmup == 0 else None
+            metrics["guard/rollbacks"] = float(len(guard.state.get("rollbacks", [])))
+            metrics["guard/disabled_terms"] = float(len(guard.disabled_terms))
+            if trig is not None:
+                metrics["guard/triggered"] = 1.0
+            if iteration % int(tr["log_every_iters"]) == 0 or trig is not None:
                 logger.log(metrics)
+            if trig is not None:
+                go_on = guard_rollback(trig)
+                if pending is not None:            # lot en cours joué par l'acteur d'avant le retour : abandonné
+                    pending.result()
+                    pending = start_collect() if go_on else None
+                if not go_on:
+                    stop_requested["flag"] = True
+                if ladder is not None:
+                    ladder.save()
+                continue
+
+            # Jalon : tous les `milestone_every_steps`, et dès la fin du recalage du critique s'il n'en existe aucun
+            # (sinon une dérive avant le premier jalon n'aurait nulle part où revenir).
+            if milestone_every > 0 and critic_warmup == 0 and (
+                    global_step >= next_milestone or not list_milestones(run_dir)):
+                save_milestone(run_dir, make_state(), keep_milestones)
+                guard.note_milestone(global_step)
+                next_milestone = (global_step // milestone_every + 1) * milestone_every
 
             if global_step >= next_ckpt:
                 save_checkpoint(run_dir, make_state(), int(tr["keep_checkpoints"]))

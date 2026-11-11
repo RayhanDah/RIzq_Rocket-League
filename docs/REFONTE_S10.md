@@ -434,3 +434,71 @@ Avant de rapatrier, renommer `runs/s10_ppo_kaggle` en `runs/s10_ppo_kaggle_s3` (
 Si les flips chutent sans que le boost monte, l'agent perd sa seule source de vitesse : c'est le risque de ce palier, à
 regarder en premier. Et les resets resteront rares : un reset utile suppose un contrôle aérien que l'agent n'a pas encore.
 La suite logique, d'après Opti : entraîner à part un modèle de kickoff, puis d'autres spécialistes, avec un sélecteur.
+
+## 11. Session 5 : retour à `v8400`, failles fermées, garde-fou (08/11/2026)
+
+### Ce qui s'est passé en session 4
+
+Le palier 6 a marché jusqu'à 8,6 G : `v8400` bat `v8100` 59-1-0 en argmax et 41-6-13 en échantillonné, avec plus de
+boost (25 contre 18) et moins de déviations (29 % contre 36 %). À 8,7 G, l'agent a trouvé une faille de `aerial_touch` :
+les touches enchaînées sans retomber étaient payées ×1,5 puis ×2, et jongler sur place rapportait ~30 / s contre 10 pour
+un but. `aerial_touch` est passé de 1 à 66 % du signal, l'agent a cessé de marquer (0,06 but / min), son Elo est tombé de
+916 à 270, et rien n'a arrêté le run : 2,2 G steps perdus. Détails : `runs/s10_ppo_kaggle/RAPPORT.md`.
+
+Le palier a rendu la faille accessible (vol boosté gratuit avec `boost_spend`, boost 21 → 52, exercice de vol, entropie
+plus basse), mais elle existait depuis le palier 3. **Aucune boucle n'avait été chiffrée avant le lancement.**
+
+### Revue de tous les termes
+
+Chaque terme qui a un poids dans un palier a été revu pour la même question : une boucle qui ne fait pas avancer le jeu
+peut-elle rapporter autant qu'un but ? Trois oui :
+
+| Terme | Boucle | Correction | Une minute de boucle |
+|---|---|---|---|
+| `aerial_touch` | jongler sur place sans retomber | payé selon le gain de vitesse vers le but adverse (plein à 1 000 uu/s) ; 1re touche du vol au moins ¼ ; touches suivantes × 0,5 par rang ; le vol finit au vrai retour au sol | 883 → **0,99** |
+| `flip_reset` | rebondir sur la balle sans sauter (5 / s) | payé seulement si le saut avait été utilisé ; 3 par vol au plus (1 + 0,5 + 0,25) | 250 → **5** |
+| `air_approach` | aller-retour sous la balle en boostant ; planer en la retouchant | plus rien après la 1re touche du vol ; l'éloignement compte en négatif | 41 → **0,8** |
+
+Les autres sont zéro-somme, potentiels, signés, ou bornés par le jeu (raison écrite pour chacun dans
+`tests/test_exploits.py`). **Règle désormais testée** : un terme qui reçoit un poids sans figurer dans cette revue fait
+échouer les tests.
+
+### Garde-fou (`train.guard`, `guard.py`)
+
+Trois signaux, chacun maintenu 60 itérations (~24 M steps) : `ladder/drop` > 120, un terme surveillé > 25 % du signal,
+entropie < 1,5. Déclenché, il recharge le meilleur jalon (checkpoint complet gardé tous les 250 M, les 8 derniers),
+écarte du pool les versions postérieures (`pool/rejected/`, rien n'est supprimé) et coupe le terme dont la part a triplé
+depuis ce jalon. Deux retours au plus ; au troisième déclenchement, il recharge le jalon et arrête le run proprement.
+Tout est noté dans `<run>/guard.json`. **Rejoué sur la session 4** : déclenché à 8,854 G (drop 144), retour au jalon de
+8,5 G (Elo 905), `aerial_touch` désigné ; 2 G steps gardés au lieu d'être perdus.
+
+### Départ de la session 5
+
+- `train.rollback_to: pool/actor_0008400059217.pt` : à la reprise sur Kaggle (10,88 G), l'acteur de `v8400` remplace
+  l'acteur effondré, une seule fois par run. Le pool ne garde pas le critique : celui de 10,88 G est recalé pendant 50
+  itérations, acteur figé (lr 0). Les ~500 versions postérieures à 8,4 G quittent le pool et l'échelle Elo. Le compteur de
+  steps continue (les nouvelles versions s'appellent `actor_00108…` et plus).
+- `ent_coef` 0,003 → 0,005 (entropie 2,1 avant la faille, 1,13 après).
+- `drill_aerial` retiré (0 % de réussite sur la session 4) ; ses 5 % vont au jeu libre.
+- `v8400` ajoutée aux adversaires fixes : `vs_anchor/actor_0008400059217` mesure le progrès depuis le départ.
+
+### Validation sur le portable (08/11)
+
+Copie du vrai run de 10,88 G (pool partiel, comme après `fetch`), reprise avec le profil s10 :
+
+- retour à `v8400` appliqué une fois, versions postérieures écartées, jalon de départ posé dès la fin du recalage ;
+- recalage du critique : KL nul (acteur figé), variance expliquée 0,59 → 0,80 en 4 itérations, puis 0,85 ;
+- jeu de `v8400` retrouvé : 2,2 à 3,0 buts / min (0,06 avant), 32 touches / min (100 avant), entropie 2,2, flips 16 / min,
+  boost 28 ;
+- parts du signal : `vel_ball_to_goal` 28 %, `goal` 18 %, `shot_threat` 14 %, `vel_player_to_ball` 14 %, `shot` 8 %,
+  `aerial_touch` 1,4 %, `air_approach` 1,5 %, `flip_reset` 0,1 % ;
+- **bug trouvé et corrigé** : l'échelle Elo gardait les versions effondrées dont le fichier n'était pas dans le pool
+  local ; `ladder/drop` restait à 664 et le garde-fou se serait déclenché à tort. Après correction : 1 681 versions,
+  dernière notée `v8400` (923), drop 17. Test ajouté (pool partiel).
+
+### Critères de la session 5
+
+Contre `v8400` échantillonné, l'agent en argmax, 200 matchs (`v8400` contre elle-même : à mesurer au retour) :
+part des buts > 60 %, duels gagnés dans les deux modes, et pas de recul sur ses acquis (boost > 22, déviations < 30 %,
+flips < 16 / min). À surveiller : vraies aériennes (0,73 / min), kickoffs (première touche perdue 3 fois sur 4 contre
+`v8100`). Puis les matchs du PO dans le vrai jeu.

@@ -69,7 +69,7 @@ def test_run_resumed_at_finition_moves_on_to_maitrise():
     msg = None
     for i in range(30):
         msg = msg or c.update({"ladder/gap/s6_spo_kaggle": 528.0}, 8_140_223_478 + i * 400_000)
-    assert c.name == "maitrise" and "maitrise" in msg and c.ppo_overrides()["ent_coef"] == 0.003
+    assert c.name == "maitrise" and "maitrise" in msg and c.ppo_overrides()["ent_coef"] == 0.005   # 0,003 en session 4
 
 
 # --------------------------------------------------------------------------- boost
@@ -298,6 +298,7 @@ def test_reset_drill_succeeds_on_a_flip_reset_only():
 
 def test_each_drill_can_set_its_own_start_and_floor():
     cfg = load_config(["kaggle_tpu", "s10"])
+    cfg["env"]["start_weights"]["drill_aerial"] = 0.05     # retiré du profil le 08/11 : on vérifie le mécanisme
     dc = DrillCurriculum.from_cfg(cfg)
     assert dc.levels["air"] == dc.levels["reset"] == 0.0
     assert dc.levels["aerial"] == 0.4 and dc.levels["aerial_defense"] == 0.2

@@ -21,9 +21,8 @@ def test_s10_effective_config(infra):
     e, r = cfg["env"], cfg["rewards"]
     assert {k: v for k, v in e["format_weights"].items() if v > 0} == {1: 1.0}
     assert {k: v for k, v in e["start_weights"].items() if v > 0} == {
-        "kickoff": 0.3, "random": 0.15, "aerial": 0.05, "attack_defense": 0.05, "drill_air": 0.15, "drill_reset": 0.05,
-        "drill_aerial": 0.05, "drill_shot": 0.05, "drill_wall": 0.05, "drill_low_boost": 0.05,
-        "drill_aerial_defense": 0.05}
+        "kickoff": 0.3, "random": 0.2, "aerial": 0.05, "attack_defense": 0.05, "drill_air": 0.15, "drill_reset": 0.05,
+        "drill_shot": 0.05, "drill_wall": 0.05, "drill_low_boost": 0.05, "drill_aerial_defense": 0.05}   # 08/11 : sans drill_aerial
     assert not e.get("adaptive_drills") and (e["ball_prediction"], e["race_features"], e["boost_features"]) == (
         True, False, False)
     assert r["anneal"] is None and r["team_spirit"]["end"] == 0.0
@@ -258,7 +257,7 @@ def test_s10_profile_trains_end_to_end_with_ladder_and_curriculum(tmp_path):
     cfg["env"]["episode_timeout_s"] = 20
     cfg["model"].update(actor_hidden=[64, 64], critic_hidden=[64, 64])
     cfg["ppo"].update(batch_steps=2000, minibatch_size=1000, device_chunk=1000, batch_schedule=None)
-    cfg["train"].update(n_workers=2, total_steps=8000, checkpoint_every_steps=4000)
+    cfg["train"].update(n_workers=2, total_steps=8000, checkpoint_every_steps=4000, rollback_to=None)  # run neuf
     cfg["selfplay"].update(pool_every_steps=2000, hist_prob=0.5, anchors=[], ladder_fit_every=2)
     # palier 1 franchi tout de suite : on vérifie le passage au palier 2 et l'envoi des poids aux workers
     cfg["curriculum"]["stages"][0].update(advance={"touches_per_min": -1.0}, min_steps=0)
@@ -377,6 +376,8 @@ def test_kaggle_fetch_keeps_recent_pool_versions_and_one_per_bucket():
     assert {s // kaggle_sync.POOL_EVERY for s in kept} == {s // kaggle_sync.POOL_EVERY for s in steps}
     assert len(kept) < len(steps) / 3
     assert not pattern.search("runs/autre/pool/actor_0000000000001.pt") and not pattern.search("runs/r2/metrics.jsonl")
+    assert not pattern.search("runs/r/pool/rejected/actor_0000000000001.pt")          # écartées par un retour en arrière
+    assert pattern.search("runs/r/checkpoints/milestones/ckpt_0000250000000.pt") and pattern.search("runs/r/guard.json")
 
 
 def test_kaggle_move_tree_merges_without_copy(tmp_path):

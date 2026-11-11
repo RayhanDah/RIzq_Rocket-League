@@ -5,8 +5,11 @@
 #   RUNS_DIR    dossier PERSISTANT des runs                      RUN_NAME    nom du run (défaut s7b_spo_kaggle)
 #   PLATFORM    auto (défaut) | kaggle (GPU) | kaggle_tpu | colab : profil d'infra (configs/<PLATFORM>.yaml)
 #   PROFILES    réglages d'apprentissage, dans l'ordre (défaut "s7 s7b")
-#   HOURS       auto (défaut : 11 h GPU, 8 h TPU) ou nb d'heures  MODE        train (défaut) | bench (mesure seule)
-#   AUTOTUNE    1 (défaut) : quelques minutes de mesures au début de la session → <run>/autotune.yaml ; 0 : profils seuls
+#   HOURS       auto (défaut) : arrêt propre MARGIN_MIN avant la limite Kaggle (12 h GPU, 9 h TPU), comptée depuis
+#               KERNEL_T0 (début de session, donné par le notebook) ; ou nb d'heures d'entraînement
+#   MARGIN_MIN  (défaut 20) marge avant la limite      MODE        train (défaut) | bench (mesure seule)
+#   AUTOTUNE    1 (défaut) : quelques minutes de mesures au début de la session → <run>/autotune.yaml (réutilisé si la
+#               session précédente a mesuré la même machine et le même lot) ; 0 : profils seuls
 #   INIT_DIR    (option) dossier avec ckpt.pt + pool/ pour le démarrage à chaud (1re session seulement)
 #   VENV_DIR    (défaut /tmp/rlenv) : HORS du dossier de sortie Kaggle (sinon ~3 Go sauvegardés)
 #   XLA_VERSION (défaut 2.9.0) : torch + torch_xla installés en session TPU (même version pour les deux)
@@ -18,6 +21,7 @@ set -euo pipefail
 PLATFORM=${PLATFORM:-auto}; RUN_NAME=${RUN_NAME:-s7b_spo_kaggle}; HOURS=${HOURS:-auto}; MODE=${MODE:-train}
 VENV_DIR=${VENV_DIR:-/tmp/rlenv}; PROFILES=${PROFILES:-"s7 s7b"}; AUTOTUNE=${AUTOTUNE:-1}; XLA_VERSION=${XLA_VERSION:-2.9.0}
 NCPU=$(nproc)
+KERNEL_T0=${KERNEL_T0:-$(date +%s)}; MARGIN_MIN=${MARGIN_MIN:-20}
 cd "$CODE_DIR"
 
 # 0) Quelle machine ? (GPU NVIDIA, sinon TPU, sinon CPU seul)
@@ -30,10 +34,14 @@ if [ "$PLATFORM" = "auto" ]; then
   elif has_tpu; then PLATFORM=kaggle_tpu
   else PLATFORM=kaggle; echo "[cloud] ni GPU ni TPU détecté : session CPU (apprentissage sur CPU, lent)"; fi
 fi
-if [ "$HOURS" = "auto" ]; then           # sessions Kaggle : 12 h en GPU, 9 h en TPU → arrêt propre 1 h avant
-  if [ "$PLATFORM" = "kaggle_tpu" ]; then HOURS=8; else HOURS=11; fi
+if [ "$HOURS" = "auto" ]; then           # sessions Kaggle : 12 h en GPU, 9 h en TPU, comptées depuis le début de session
+  if [ "$PLATFORM" = "kaggle_tpu" ]; then LIMIT_H=9; else LIMIT_H=12; fi
+  STOP_AT=$(( KERNEL_T0 + LIMIT_H * 3600 - MARGIN_MIN * 60 ))
+  echo "[cloud] plateforme : $PLATFORM | profils : $PROFILES | run : $RUN_NAME | arrêt propre à $(date -u -d "@$STOP_AT" +%H:%M) UTC ($LIMIT_H h - $MARGIN_MIN min après le début de session)"
+else
+  STOP_AT=""
+  echo "[cloud] plateforme : $PLATFORM | profils : $PROFILES | run : $RUN_NAME | arrêt après $HOURS h d'entraînement"
 fi
-echo "[cloud] plateforme : $PLATFORM | profils : $PROFILES | run : $RUN_NAME | arrêt après $HOURS h"
 
 # 1) Environnement Python isolé (uv : rapide ; Python 3.12 téléchargé si besoin)
 if [ ! -x "$VENV_DIR/bin/python" ]; then
@@ -140,8 +148,9 @@ if [ "$MODE" = "bench" ] || [ "$AUTOTUNE" = "1" ]; then
     STEP=$("$PY" -c 'import sys, torch; print(int(torch.load(sys.argv[1], map_location="cpu", weights_only=False)["global_step"]))' "$INIT_DIR/ckpt.pt" || echo 0)
   fi
   LEARNERS=$DEVICE; [ "$DEVICE" = "xla" ] && LEARNERS="xla,cpu"
+  REUSE=(); [ "$MODE" = "bench" ] || REUSE=(--reuse)
   if ! "$PY" scripts/autotune.py "${PROF[@]}" "${INFRA[@]}" --pool "$RUN_DIR/pool" --step "$STEP" \
-       --learner "$LEARNERS" --out "$TUNE"; then
+       --learner "$LEARNERS" --out "$TUNE" "${REUSE[@]}"; then
     echo "[cloud] autoréglage en échec : on garde les profils ($PLATFORM)"
     rm -f "$TUNE"
   fi
@@ -156,7 +165,11 @@ ARGS+=("${INIT[@]}")
 
 # 6) Arrêt propre avant la fin de session (checkpoint garanti), puis entraînement au premier plan
 # (minuteur SANS accès à la sortie : sinon son `sleep` garderait le flux ouvert et le notebook attendrait des heures)
-( sleep "$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 }')" && touch "$RUN_DIR/STOP" ) </dev/null >/dev/null 2>&1 &
+if [ -n "$STOP_AT" ]; then
+  WAIT=$(( STOP_AT - $(date +%s) )); if [ "$WAIT" -lt 60 ]; then WAIT=60; fi
+else WAIT=$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 }'); fi
+echo "[cloud] entraînement : $(awk -v w="$WAIT" 'BEGIN { printf "%.2f", w / 3600 }') h avant l'arrêt propre"
+( sleep "$WAIT" && touch "$RUN_DIR/STOP" ) </dev/null >/dev/null 2>&1 &
 TIMER=$!
 trap 'touch "$RUN_DIR/STOP"' INT TERM
 "$PY" -m rlagent.train "${ARGS[@]}" 2>&1 | tee -a "$RUNS_DIR/$RUN_NAME.log"

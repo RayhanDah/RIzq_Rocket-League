@@ -66,6 +66,13 @@ class Ladder:
             acc[0] += float(score)
             acc[1] += 1.0
 
+    def remove(self, versions: Iterable[str]) -> None:
+        """Retour en arrière : ces versions et la politique courante (remplacée) sortent de l'échelle, avec leurs parties."""
+        gone = set(versions) | {CURRENT}
+        self.players = {k: v for k, v in self.players.items() if k not in gone}
+        self.games = {k: v for k, v in self.games.items() if k[0] not in gone and k[1] not in gone}
+        self.ratings = {k: v for k, v in self.ratings.items() if k not in gone}
+
     def _versions(self) -> List[str]:
         return sorted((p for p, s in self.players.items() if s >= 0), key=lambda p: self.players[p])
 

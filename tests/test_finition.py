@@ -241,7 +241,8 @@ def test_finition_uses_new_terms_and_drills():
     assert next(t for t in rf.terms if isinstance(t, AirApproachTerm)).boost_only
     assert next(t for t in rf.terms if isinstance(t, AerialTouchTerm)).min_air_boost == pytest.approx(30.0)
     w = cfg["env"]["start_weights"]
-    assert sum(w.values()) == pytest.approx(1.0) and w["drill_aerial"] > 0.0 and w["drill_shot"] > 0.0
+    assert sum(w.values()) == pytest.approx(1.0) and w["drill_shot"] > 0.0
+    assert w["drill_aerial"] == 0.0 and w["drill_air"] > 0.0        # 08/11 : 0 % de réussite en session 4, remplacé par le vol
     assert cfg["env"]["drill_curriculum"]["enabled"]
 
 
@@ -250,6 +251,7 @@ def test_aerial_drill_stays_where_flying_pays():
     from rlagent.env.mutators import _lerp
     from rlagent.train import DrillCurriculum
     cfg = load_config(["kaggle_tpu", "s10"])
+    cfg["env"]["start_weights"]["drill_aerial"] = 0.05     # retiré du profil le 08/11 : on vérifie le mécanisme
     dc = DrillCurriculum.from_cfg(cfg)
     assert {"aerial", "shot"} <= set(dc.levels)
     for _ in range(200):
