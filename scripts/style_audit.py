@@ -2,6 +2,10 @@
 
     python scripts/style_audit.py --a runs/s10_ppo_kaggle/best_actor.pt --b runs/s10_ppo_kaggle/best_actor.pt --det-a
     python scripts/style_audit.py --a <nouvel agent> --b runs/s10_ppo_kaggle/best_actor.pt --det-a --games 40
+    python scripts/style_audit.py --a <agent> --b necto --det-a --games 40       # Necto (NectoFamily), argmax
+
+`necto` / `necto:<beta>` : le vrai Necto via l'adaptateur `rlagent/opponents/necto.py` (fidélité mesurée par
+`scripts/necto_check.py`, rappelée dans le rapport). Jamais dans le pool d'entraînement.
 
 Toujours le même adversaire pour comparer deux agents. Trois blocs :
   - rush : vitesse, pression, contacts : ce qu'il ne faut pas perdre ;
@@ -46,6 +50,7 @@ def setup(config: str) -> None:
         return
     import torch
     import yaml
+
     from rlagent.env.factory import build_env
     torch.set_num_threads(1)
     cfg = yaml.safe_load(Path(config).read_text(encoding="utf-8"))
@@ -57,21 +62,31 @@ def setup(config: str) -> None:
     cfg["env"]["adaptive_drills"] = False
     _tick_s = cfg["env"]["action_repeat"] / 120.0
     _env = build_env(cfg, seed=int(time.time_ns() % 2**31))
+    from rlagent.opponents.necto import MixedRepeatAction
+    _env.action_parser = MixedRepeatAction(cfg["env"]["action_repeat"])    # indices : inchangé ; Necto : commandes
 
 
 def actor(spec: str):
     from evaluate import load_actor
+
+    from rlagent.opponents.necto import NectoOpponent, is_necto_spec
     if spec not in _actors:
-        _actors[spec] = load_actor(spec)
+        seed = int(time.time_ns() % 2**31)
+        _actors[spec] = NectoOpponent.from_spec(spec, seed=seed) if is_necto_spec(spec) else load_actor(spec)
     return _actors[spec]
 
 
 def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
     import torch
+
     from rlagent.env.common import is_flip_reset
     from rlagent.env.predict import goal_line_time, goal_threat
+    from rlagent.opponents.necto import NectoOpponent, pad_locations_of
     env = _env
     pol = {"A": actor(spec_a), "B": actor(spec_b)}
+    necto = [p for p in pol.values() if isinstance(p, NectoOpponent)]
+    for p in necto:
+        p.new_game(pad_locations_of(env))
     st = {s: {k: 0 for k in COUNTERS} | {k: 0.0 for k in SUMS} for s in "AB"}
     side_of = {a_team: "A", 1 - a_team: "B"}
 
@@ -85,14 +100,21 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
         return ball, cars
 
     obs = env.reset()
+    for p in necto:
+        p.on_reset(env.state)
     prev_ball, prev = fresh()
     last_touch = None
     t = 0.0
+    spawn = lambda: tuple(tuple(np.round(c.physics.position[:2]).tolist()) for c in env.state.cars.values())
+    episodes, ep_start, ep_steps = [], spawn(), 0
     while t < GAME_S:
         actions = {}
         for side in "AB":
             team = a_team if side == "A" else 1 - a_team
             agents = [ag for ag in obs if env.state.cars[ag].team_num == team]
+            if isinstance(pol[side], NectoOpponent):
+                actions.update(pol[side].act(agents, env.state))
+                continue
             x = torch.as_tensor(np.stack([obs[ag] for ag in agents]), dtype=torch.float32)
             with torch.no_grad():
                 act, _ = pol[side].act(x, deterministic=(det_a and side == "A"))
@@ -155,15 +177,21 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
             p.update(flip=bool(car.has_flipped), demo=demo, boost=boost, victim=car.bump_victim_id, ground=ground,
                      jumped=bool(car.has_jumped))
         prev_ball = (pos, vel)
+        ep_steps += 1
         scored = any(term.values())
         if scored:
             st[side_of[state.scoring_team]]["goals"] += 1
             if last_touch and last_touch[1] and last_touch[0] == side_of[state.scoring_team]:
                 st[last_touch[0]]["aerial_goals"] += 1
         if scored or any(trunc.values()):
+            episodes.append((ep_start, side_of[state.scoring_team] if scored else "-", ep_steps))
             obs = env.reset()
+            for p in necto:
+                p.on_reset(env.state)
             prev_ball, prev = fresh()
             last_touch = None
+            ep_start, ep_steps = spawn(), 0
+    st["episodes"] = episodes       # (placement au kickoff, buteur, durée) : diversité des parties
     return st
 
 
@@ -178,7 +206,7 @@ def task(config, spec_a, spec_b, det_a, seed, n_games):
 def summarize(d: dict) -> dict:
     n = max(1.0, d["steps"])
     minutes = n * _STEP_S / 60.0
-    per_min = lambda k: d[k] / minutes     # noqa: E731
+    per_min = lambda k: d[k] / minutes
     shots = d["on_target"] + d["off_target"]
     return {
         "rush": {"vitesse": d["speed"] / n, "supersonique_%": 100 * d["supersonic"] / n, "flips/min": per_min("flips"),
@@ -208,7 +236,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--a", required=True)
     ap.add_argument("--b", required=True)
-    ap.add_argument("--det-a", action="store_true", help="A en argmax (comme le bot) ; B reste échantillonné")
+    ap.add_argument("--det-a", action="store_true",
+                    help="A en argmax (comme le bot) ; B reste échantillonné (sauf necto : argmax, necto:<beta> sinon)")
     ap.add_argument("--games", type=int, default=40)
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--config", default=str(ROOT / "runs/s10_ppo_kaggle/config.yaml"))
@@ -218,10 +247,12 @@ def main():
              for c in range(0, args.games, CHUNK)]
     total = {s: {k: 0.0 for k in COUNTERS + SUMS} for s in "AB"}
     wins = draws = 0
+    kick_eps = []
     t0 = time.time()
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         for f in as_completed([ex.submit(task, *t) for t in tasks]):
             for game in f.result():
+                kick_eps += [(str(e[0]), e[1], e[2]) for e in game.pop("episodes")]
                 for s in "AB":
                     for k, v in game[s].items():
                         total[s][k] += v
@@ -229,8 +260,17 @@ def main():
                 draws += game["A"]["goals"] == game["B"]["goals"]
     res = {"a": args.a, "b": args.b, "det_a": args.det_a, "games": args.games, "wins": wins, "draws": draws,
            "goals": [total["A"]["goals"], total["B"]["goals"]], "A": summarize(total["A"]), "B": summarize(total["B"])}
+    n_starts = len({e[0] for e in kick_eps})
+    res["episodes"] = {"total": len(kick_eps), "debuts_distincts": n_starts, "issues_distinctes": len(set(kick_eps))}
     print(f"{args.games} matchs en {time.time() - t0:.0f} s | A : {wins} V, {draws} N, {args.games - wins - draws} D | "
           f"buts {total['A']['goals']:.0f}-{total['B']['goals']:.0f}")
+    print(f"remises au centre : {len(kick_eps)}, débuts distincts {n_starts}, (début, buteur, durée) distincts "
+          f"{len(set(kick_eps))}" + ("  <- deux politiques déterministes : peu de parties vraiment différentes"
+                                     if len(set(kick_eps)) < len(kick_eps) / 4 else ""))
+    from rlagent.opponents.necto import fidelity_report, is_necto_spec
+    if is_necto_spec(args.a) or is_necto_spec(args.b):
+        res["necto_fidelite"] = fidelity_report()
+        print("--- Necto (adaptateur RocketSim)\n" + res["necto_fidelite"]["texte"])
     for block in ("rush", "finition", "aerien"):
         print(f"--- {block}" + " " * 22 + "A        B")
         for k in res["A"][block]:
