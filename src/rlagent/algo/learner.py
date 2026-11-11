@@ -78,12 +78,28 @@ def resident_log_probs(actor: nn.Module, obs: torch.Tensor, act: torch.Tensor, r
     return out
 
 
+def shared_obs(trajs: List[Trajectory]) -> Optional[np.ndarray]:
+    """Tableau commun des observations si les trajectoires en sont des vues consécutives couvrant tout le tableau
+    (Trajectory.obs_base, collecte locale par mémoire partagée), sinon None."""
+    if not trajs or trajs[0].obs_base is None:
+        return None
+    base, pos = trajs[0].obs_base[0], 0
+    for t in trajs:
+        if t.obs_base is None or t.obs_base[0] is not base or t.obs_base[1] != pos:
+            return None
+        pos += len(t)
+    return base if pos == len(base) and base.dtype == np.float32 else None
+
+
 def build_batch(trajs: List[Trajectory], critic: nn.Module, ret_stats: RunningStats, cfg: Dict[str, Any],
                 device: torch.device) -> Dict[str, np.ndarray]:
     p = cfg["ppo"]
     gamma, lam = float(p["gamma"]), float(p["gae_lambda"])
-    # trajectoires en listes (collecte centrale) ou en tableaux (collecte locale, Trajectory.compact) : mêmes valeurs
-    obs = np.concatenate([np.asarray(t.obs, dtype=np.float32).reshape(len(t), -1) for t in trajs])
+    # trajectoires en listes (collecte centrale) ou en tableaux (collecte locale, Trajectory.compact) : mêmes valeurs ;
+    # collecte locale par mémoire partagée : les obs sont déjà un seul tableau, dans l'ordre (aucune copie)
+    obs = shared_obs(trajs)
+    if obs is None:
+        obs = np.concatenate([np.asarray(t.obs, dtype=np.float32).reshape(len(t), -1) for t in trajs])
     boot_idx = [i for i, t in enumerate(trajs) if t.bootstrap_obs is not None]
     boot_obs = (np.stack([trajs[i].bootstrap_obs for i in boot_idx]).astype(np.float32)
                 if boot_idx else np.zeros((0, obs.shape[1]), np.float32))

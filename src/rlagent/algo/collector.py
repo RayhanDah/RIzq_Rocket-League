@@ -44,13 +44,17 @@ class Trajectory:
     bootstrap_obs: Optional[np.ndarray] = None   # None = terminée par un but (valeur finale 0)
     slot: Optional[int] = None                   # arène (w * envs_per_worker + e) et index d'agent : diagnostic/tests
     agent: Optional[int] = None
+    # (tableau, début) : obs = vue de ce tableau qui regroupe tout le lot (collecte locale par mémoire partagée) ;
+    # build_batch le reprend tel quel au lieu de recopier les observations
+    obs_base: Optional[Tuple[np.ndarray, int]] = None
 
     def __len__(self) -> int:
         return len(self.actions)
 
     def compact(self) -> "Trajectory":
         """Listes → tableaux numpy (envoi entre processus bien plus rapide ; mêmes valeurs)."""
-        return Trajectory(np.stack(self.obs).astype(np.float32, copy=False), np.asarray(self.actions, np.int64),
+        obs = None if self.obs is None else np.stack(self.obs).astype(np.float32, copy=False)
+        return Trajectory(obs, np.asarray(self.actions, np.int64),
                           np.asarray(self.log_probs, np.float32), np.asarray(self.rewards, np.float32),
                           self.bootstrap_obs, self.slot, self.agent)
 
@@ -409,12 +413,53 @@ class SharedWeights:
             pass
 
 
+class SharedBlock:
+    """Bloc de mémoire partagée (contrôle de la collecte, tampon d'observations). make() renvoie None s'il est
+    indisponible ou si /dev/shm est trop petit (conteneur Docker : 64 Mo par défaut ; écrire au-delà tuerait le worker
+    par SIGBUS)."""
+
+    def __init__(self, nbytes: int):
+        from multiprocessing import shared_memory
+        self.shm = shared_memory.SharedMemory(create=True, size=max(8, int(nbytes)))
+
+    @staticmethod
+    def make(nbytes: int) -> Optional["SharedBlock"]:
+        import os
+        try:
+            if os.path.isdir("/dev/shm"):
+                st = os.statvfs("/dev/shm")
+                if st.f_bavail * st.f_frsize < 1.25 * nbytes + (64 << 20):
+                    return None
+            return SharedBlock(nbytes)
+        except Exception:  # noqa: BLE001
+            return None
+
+    @property
+    def name(self) -> str:
+        return self.shm.name
+
+    def close(self) -> None:
+        try:
+            self.shm.close()
+            self.shm.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def flat_params(actor: torch.nn.Module) -> np.ndarray:
     return torch.nn.utils.parameters_to_vector(actor.parameters()).detach().float().cpu().numpy()
 
 
 class LocalCollector(_WorkerPool):
-    """Chaque worker joue avec sa propre copie de l'acteur (voir le docstring du module)."""
+    """Chaque worker joue avec sa propre copie de l'acteur (voir le docstring du module).
+
+    Arrêt global (`train.collect_sync`, défaut oui) : au lieu d'un quota fixe par worker (le lot attendait le plus lent,
+    ~0,7-1 s perdues par lot de 400 k sur Kaggle), chaque worker publie son nombre de transitions en mémoire partagée
+    et tous s'arrêtent dès que le TOTAL atteint le lot : les plus rapides en jouent plus. Observations par mémoire
+    partagée (`train.collect_shared_obs`, défaut oui) : les ~490 Mo d'un lot ne passent plus par les pipes (ni pickle,
+    ni décodage par le processus principal). Sans mémoire partagée utilisable : quota fixe et pipes, comme avant."""
+
+    QUOTA_CAP = 2.5            # plafond par worker = 2,5 × la part égale (taille du tampon d'observations)
 
     def __init__(self, cfg: Dict[str, Any], n_workers: int, seed: int, pool=None,
                  build_actor_fn: Optional[Callable] = None, envs_per_worker: Optional[int] = None):
@@ -431,6 +476,23 @@ class LocalCollector(_WorkerPool):
             self.weights = SharedWeights(n_params)
         except Exception as err:  # noqa: BLE001 — /dev/shm absent ou trop petit : les poids passent par les pipes
             print(f"[collect] mémoire partagée indisponible ({err}) : poids envoyés par pipe")
+        tr = cfg["train"]
+        self.shared_obs = bool(tr.get("collect_shared_obs", True))
+        self.ctrl: Optional[SharedBlock] = None
+        self.ctrl_arr: Optional[np.ndarray] = None
+        if bool(tr.get("collect_sync", True)):
+            self.ctrl = SharedBlock.make(8 * (len(self.conns) + 1))
+            if self.ctrl is None:
+                print("[collect] mémoire partagée indisponible : quota fixe par worker")
+            else:
+                self.ctrl_arr = np.ndarray((len(self.conns) + 1,), dtype=np.int64, buffer=self.ctrl.shm.buf)
+                self.ctrl_arr[:] = 0
+        self.gen = 0
+        self.obs_block: Optional[SharedBlock] = None
+        self.obs_rows = 0                # lignes par worker du tampon d'observations
+        self.obs_dim = 0                 # connu après la 1re collecte (observations passées par les pipes)
+        self.obs_failed = False
+        self.last_stats: Dict[str, float] = {}
 
     @property
     def n_envs(self) -> int:
@@ -442,6 +504,37 @@ class LocalCollector(_WorkerPool):
             for e, p in self.pool.sampling_distribution():
                 entries.append(({"id": e["id"], "path": str(e["path"]), "elo": float(e["elo"])}, float(p)))
         return {"hist_prob": self.hist_prob if entries else 0.0, "entries": entries}
+
+    def _obs_buffer(self, rows: int) -> Optional[Tuple[str, int]]:
+        """Tampon d'observations d'au moins `rows` lignes par worker (réalloué si le lot grandit)."""
+        if not self.shared_obs or self.obs_failed or self.ctrl_arr is None or self.obs_dim <= 0:
+            return None
+        if self.obs_block is None or rows > self.obs_rows:
+            if self.obs_block is not None:
+                self.obs_block.close()
+            self.obs_block = SharedBlock.make(4 * rows * self.obs_dim * len(self.conns))
+            if self.obs_block is None:
+                self.obs_failed = True
+                print("[collect] pas assez de mémoire partagée pour les observations : envoi par pipe")
+                return None
+            self.obs_rows = rows
+        return self.obs_block.name, self.obs_rows
+
+    def _wait_total(self, n_steps: int, timeout: float) -> None:
+        """Attend que le total des workers atteigne `n_steps`, puis donne le signal d'arrêt (ctrl[0] = génération).
+        Panne d'un worker (processus mort) ou délai dépassé : on sort, _recv lèvera l'erreur."""
+        deadline = time.perf_counter() + timeout
+        next_check = time.perf_counter() + 1.0
+        while int(self.ctrl_arr[1:].sum()) < n_steps:
+            now = time.perf_counter()
+            if now > deadline:
+                break
+            if now > next_check:
+                next_check = now + 1.0
+                if not all(p.is_alive() for p in self.procs):
+                    break
+            time.sleep(0.0005)
+        self.ctrl_arr[0] = self.gen
 
     @torch.no_grad()
     def collect(self, actor: torch.nn.Module, n_steps: int, device: torch.device
@@ -455,27 +548,81 @@ class LocalCollector(_WorkerPool):
             weights = ("raw", flat)
         hist = self._hist_info()
         W = len(self.conns)
-        quota = int(math.ceil(max(0, n_steps) / W))
-        for conn in self.conns:
-            conn.send(("collect", quota, weights, hist))
+        fair = int(math.ceil(max(0, n_steps) / W))
+        timeout = 600.0 + 0.05 * fair             # ~ 20 steps/s minimum par worker avant de déclarer une panne
+        sync = self.ctrl_arr is not None
+        obs = None
+        if sync:
+            quota = int(math.ceil(self.QUOTA_CAP * fair)) + 1
+            # une itération de la boucle d'un worker ajoute au plus (arènes × 6 voitures) transitions
+            obs = self._obs_buffer(quota + 6 * self.envs_per_worker)
+            self.gen += 1
+            self.ctrl_arr[1:] = 0
+            for w, conn in enumerate(self.conns):
+                conn.send(("collect", quota, weights, hist,
+                           {"ctrl": self.ctrl.name, "slots": W, "index": w, "gen": self.gen, "obs": obs}))
+            self._wait_total(n_steps, timeout)
+        else:
+            for conn in self.conns:
+                conn.send(("collect", fair, weights, hist))
+        t_stop = time.perf_counter()
         trajs: List[Trajectory] = []
         episodes: List[Dict[str, Any]] = []
+        per_worker: List[int] = []
+        actives: List[float] = []
         collected = 0
-        timeout = 600.0 + 0.05 * quota            # ~ 20 steps/s minimum par worker avant de déclarer une panne
         for w in range(W):
-            t, e, n = self._recv(w, timeout=timeout)
+            payload = self._recv(w, timeout=timeout)
+            t, e, n = payload[:3]
+            if len(payload) > 3:
+                actives.append(float(payload[3]["t_active"]))
             for traj in t:                         # index d'arène global, comme en collecte centrale
                 traj.slot = w * self.envs_per_worker + traj.slot
             trajs.extend(t)
             episodes.extend(e)
+            per_worker.append(int(n))
             collected += n
+        t_recv = time.perf_counter()
+        if obs is not None:
+            self._attach_obs(trajs, per_worker)
+        elif self.obs_dim <= 0 and trajs and trajs[0].obs is not None:
+            self.obs_dim = int(np.asarray(trajs[0].obs).shape[-1])   # tampon partagé dès la collecte suivante
+        t_end = time.perf_counter()
+        pw = np.asarray(per_worker, dtype=np.float64)
+        self.last_stats = {
+            "collect/worker_steps_min": float(pw.min()), "collect/worker_steps_median": float(np.median(pw)),
+            "collect/worker_steps_max": float(pw.max()), "collect/sync": float(sync),
+            "collect/shared_obs": float(obs is not None),
+            "time/collect_run_s": t_stop - t0,       # jusqu'au signal d'arrêt (quota fixe : jusqu'à l'envoi)
+            "time/collect_recv_s": t_recv - t_stop,  # fin des workers + réception
+            "time/collect_obs_s": t_end - t_recv,    # recopie des observations depuis la mémoire partagée
+        }
+        if actives:
+            a = np.asarray(actives)
+            self.last_stats.update({"collect/worker_active_min_s": float(a.min()),
+                                    "collect/worker_active_max_s": float(a.max())})
         return trajs, episodes, collected, time.perf_counter() - t0
+
+    def _attach_obs(self, trajs: List[Trajectory], per_worker: List[int]) -> None:
+        """Observations du tampon partagé → UN tableau du lot (une seule copie, avant que les workers ne réécrivent le
+        tampon à la collecte suivante) ; chaque trajectoire en reçoit une vue."""
+        rows = self.obs_rows
+        flat = np.ndarray((len(self.conns) * rows, self.obs_dim), dtype=np.float32, buffer=self.obs_block.shm.buf)
+        obs_all = np.concatenate([flat[w * rows:w * rows + n] for w, n in enumerate(per_worker)])
+        pos = 0
+        for t in trajs:
+            k = len(t)
+            t.obs = obs_all[pos:pos + k]
+            t.obs_base = (obs_all, pos)
+            pos += k
 
     def close(self) -> None:
         self._close_workers()
-        if self.weights is not None:
-            self.weights.close()
-            self.weights = None
+        for blk in (self.weights, self.ctrl, self.obs_block):
+            if blk is not None:
+                blk.close()
+        self.weights = self.ctrl = self.obs_block = None
+        self.ctrl_arr = None
 
 
 def make_collector(cfg: Dict[str, Any], n_workers: int, seed: int, pool=None,

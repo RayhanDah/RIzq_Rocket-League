@@ -168,3 +168,25 @@ def test_resident_batch_matches_host_batch():
         assert s1[k] == pytest.approx(s0[k], rel=1e-4, abs=1e-6), k
     for p, q in zip(w0, w1):
         assert torch.allclose(p, q, atol=1e-5)
+
+
+def test_xla_counters_per_iteration():
+    """time/xla_* et xla/* (train.py) : différences des métriques de torch_xla sur une itération d'apprentissage."""
+    from rlagent.algo.learner import make_optimizer, ppo_update
+    from rlagent.env.actions import N_ACTIONS
+    from rlagent.models.attention import build_models
+    cfg = _cfg()
+    xla = accel.resolve_device("xla")
+    torch.manual_seed(0)
+    actor, critic = build_models(cfg, N_ACTIONS)
+    actor.to(xla)
+    critic.to(xla)
+    accel.prepare_models(xla, actor, critic)
+    before = accel.xla_counters(xla)
+    batch = _batch(cfg, actor, critic, 600, 0)
+    ppo_update(actor, critic, make_optimizer(actor, critic, cfg), batch, cfg, xla, decoupled=True)
+    d = accel.xla_delta(before, accel.xla_counters(xla))
+    for key in ("time/xla_tracing_s", "time/xla_execute_s", "time/xla_to_device_s", "xla/to_device_mb"):
+        assert key in d and d[key] >= 0.0, key
+    assert d["xla/to_device_mb"] > 0.0
+    assert accel.xla_counters(torch.device("cpu")) == {} and accel.xla_delta({}, {}) == {}

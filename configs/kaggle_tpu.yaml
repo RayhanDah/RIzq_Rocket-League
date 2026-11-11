@@ -8,7 +8,9 @@ ppo:
   device: xla
   batch_steps: 50_000
   minibatch_size: 25_000
-  device_chunk: 12_500         # divise les minibatchs de 25k et 50k : une seule forme compilée par XLA
+  # 50k : divise les minibatchs de 50k et 100k (une seule forme compilée par XLA). 4× moins de morceaux que 12,5k
+  # (préparation des graphes côté hôte ÷4, produits matriciels plus gros) ; ~1,6 Go d'activations, 16 Go par puce v5e.
+  device_chunk: 50_000
 train:
   collect_mode: local
   n_workers: all               # remplacé par autotune / run_cloud.sh selon nproc

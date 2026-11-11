@@ -167,6 +167,42 @@ def to_cpu(obj: Any) -> Any:
     return obj
 
 
+# Métriques de torch_xla suivies par itération (time/xla_*) : temps cumulés en ns, octets pour In/OutboundData.
+XLA_METRICS = {"LazyTracing": "time/xla_tracing_s", "CompileTime": "time/xla_compile_s",
+               "ExecuteTime": "time/xla_execute_s", "TransferToDeviceTime": "time/xla_to_device_s",
+               "TransferFromDeviceTime": "time/xla_from_device_s", "InboundData": "xla/to_device_mb",
+               "OutboundData": "xla/from_device_mb"}
+
+
+def xla_counters(device: Any) -> Dict[str, float]:
+    """Totaux courants des métriques de torch_xla (vide hors XLA) ; xla_delta(avant, après) donne l'itération."""
+    if not is_xla(device):
+        return {}
+    try:
+        import torch_xla.debug.metrics as met
+        out: Dict[str, float] = {}
+        names = set(met.metric_names())
+        for name in XLA_METRICS:
+            if name in names:
+                data = met.metric_data(name)
+                out[name] = float(data[1]) if data else 0.0
+        out["UncachedCompile"] = float(met.counter_value("UncachedCompile") or 0)
+        return out
+    except Exception:  # noqa: BLE001 — API absente selon la version : pas de métriques, pas de panne
+        return {}
+
+
+def xla_delta(before: Dict[str, float], after: Dict[str, float]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for name, key in XLA_METRICS.items():
+        if name in after:
+            d = after[name] - before.get(name, 0.0)
+            out[key] = d / (1e6 if key.endswith("_mb") else 1e9)
+    if "UncachedCompile" in after:
+        out["xla/compiles"] = after["UncachedCompile"] - before.get("UncachedCompile", 0.0)
+    return out
+
+
 def describe(device: Any) -> str:
     dev = torch.device(device)
     if dev.type == "cuda":

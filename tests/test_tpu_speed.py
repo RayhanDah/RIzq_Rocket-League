@@ -161,3 +161,78 @@ def test_autotune_report_from_older_rule_is_rechosen_without_measuring(tmp_path,
     assert prof["train"]["n_workers"] == 168 and prof["ppo"]["device"] == "xla"
     assert json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))["rule"] == autotune.PICK_RULE
     assert autotune.reusable(out, 224, 0, 400_000, None)                  # session suivante : gardé tel quel
+
+
+# --------------------------------------------------------------------------- collecte locale : arrêt global, obs partagées
+def _local_cfg(**train):
+    from rlagent.config import load_config
+    cfg = load_config(["debug"])
+    cfg["env"]["engine"] = "fake"
+    cfg["env"]["format_weights"] = {1: 0.5, 2: 0.3, 3: 0.2}
+    cfg["env"]["no_touch_timeout_s"] = 5
+    cfg["env"]["episode_timeout_s"] = 20
+    cfg["selfplay"]["hist_prob"] = 0.0
+    cfg["train"].update(train)
+    return cfg
+
+
+def _local_actor(cfg):
+    import torch
+    from rlagent.env.actions import N_ACTIONS
+    from rlagent.models.attention import build_models
+    torch.manual_seed(0)
+    return build_models(cfg, N_ACTIONS)[0]
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_local_collection_global_stop_and_shared_obs(shared):
+    """Arrêt global : le lot s'arrête au total demandé (pas au quota de chaque worker). Obs par mémoire partagée dès la
+    2e collecte : alignées (l'obs de reprise d'une trajectoire coupée = 1re obs de sa suite au lot suivant, l'une
+    passée par le pipe, l'autre par la mémoire partagée) et reprises telles quelles par build_batch."""
+    import torch
+    from rlagent.algo.collector import LocalCollector
+    from rlagent.algo.learner import shared_obs
+    cfg = _local_cfg(collect_shared_obs=shared)
+    # épisodes finis seulement par un but (bootstrap None) : toute obs de reprise vient d'une coupure de fin de lot
+    # (une troncature au dernier pas aurait la même forme, suivie d'un nouvel épisode)
+    cfg["env"]["no_touch_timeout_s"] = cfg["env"]["episode_timeout_s"] = 100_000
+    col = LocalCollector(cfg, 3, seed=0, envs_per_worker=2)
+    try:
+        assert col.ctrl_arr is not None
+        actor, cpu = _local_actor(cfg), torch.device("cpu")
+        batches = [col.collect(actor, 1200, cpu) for _ in range(3)]
+        stats = col.last_stats
+    finally:
+        col.close()
+    for trajs, _, n, _ in batches:
+        # arrêt au total, loin du plafond par worker (2,5 × 400) ; le moteur factice est si rapide qu'un worker peut faire
+        # quelques tours de boucle entre deux lectures des compteurs par le principal
+        assert 1200 <= n < 1.5 * 1200
+        assert sum(len(t) for t in trajs) == n
+        assert all(np.asarray(t.obs).shape == (len(t), np.asarray(batches[0][0][0].obs).shape[-1]) for t in trajs)
+    assert stats["collect/sync"] == 1.0 and stats["collect/shared_obs"] == float(shared)
+    assert stats["collect/worker_steps_min"] <= stats["collect/worker_steps_max"]
+    for prev, nxt in ((batches[0][0], batches[1][0]), (batches[1][0], batches[2][0])):
+        cut = {(t.slot, t.agent): t.bootstrap_obs for t in prev if t.bootstrap_obs is not None}
+        first = {}
+        for t in nxt:
+            first.setdefault((t.slot, t.agent), np.asarray(t.obs)[0])
+        common = [k for k in cut if k in first]
+        assert common
+        for k in common:
+            np.testing.assert_array_equal(cut[k], first[k])
+    assert (shared_obs(batches[2][0]) is not None) == shared
+
+
+def test_local_collection_fixed_quota_without_sync():
+    import torch
+    from rlagent.algo.collector import LocalCollector
+    cfg = _local_cfg(collect_sync=False)
+    col = LocalCollector(cfg, 2, seed=0, envs_per_worker=2)
+    try:
+        assert col.ctrl_arr is None
+        _, _, n, _ = col.collect(_local_actor(cfg), 1000, torch.device("cpu"))
+        assert n >= 1000 and col.last_stats["collect/sync"] == 0.0
+        assert col.last_stats["collect/worker_steps_min"] >= 500       # quota fixe : chacun sa part
+    finally:
+        col.close()

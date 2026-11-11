@@ -12,13 +12,19 @@ les EpisodeStart et les StepResult sont des listes (une entrée par arène). En 
      (collecte en double tampon, `train.collect_pipeline`).
 Mode local (`train.collect_mode: local`, local=True) : le worker a sa propre copie de l'acteur. Au démarrage il envoie
 ("ok", nb_de_paramètres_de_l_acteur), puis :
-  → ("collect", quota, poids, adversaires)  ← ("ok", (trajectoires, épisodes, n)) : joue jusqu'à `quota` transitions
-     apprenantes. poids = ("shm", nom, n) (mémoire partagée) ou ("raw", vecteur) ; adversaires = {"hist_prob",
-     "entries": [(entrée du pool, probabilité), ...]}.
+  → ("collect", quota, poids, adversaires[, sync])  ← ("ok", (trajectoires, épisodes, n[, infos])) : joue jusqu'à
+     `quota` transitions apprenantes. poids = ("shm", nom, n) (mémoire partagée) ou ("raw", vecteur) ; adversaires =
+     {"hist_prob", "entries": [(entrée du pool, probabilité), ...]}.
+     sync (collecte à arrêt global, cf. collector.LocalCollector) = {"ctrl": nom, "slots": W, "index": w, "gen": g,
+     "obs": (nom, lignes) ou None} : le worker publie son nombre de transitions dans ctrl[1 + w] et s'arrête dès que
+     ctrl[0] == g (le principal y écrit g quand le TOTAL atteint le lot) ; `quota` n'est alors qu'un plafond. Avec
+     "obs", les observations des trajectoires sont écrites dans la mémoire partagée (lignes [w·lignes, ...), dans
+     l'ordre des trajectoires renvoyées) au lieu de passer par le pipe : Trajectory.obs = None au retour.
 """
 from __future__ import annotations
 
 import os
+import time
 import traceback
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -124,6 +130,7 @@ class LocalPolicy:
         self.hist: Dict[str, Any] = {"hist_prob": 0.0, "entries": []}
         self._hist_actors: "Dict[str, Any]" = {}
         self._shm = None
+        self._sync_shm: Dict[str, Any] = {}       # nom → SharedMemory (contrôle de l'arrêt, tampon d'observations)
         self.rollout = None
 
     def load_weights(self, weights) -> None:
@@ -168,7 +175,22 @@ class LocalPolicy:
                     del self._hist_actors[k]
         return actor
 
-    def collect(self, runners: List["EnvRunner"], quota: int, weights, hist: Dict[str, Any]):
+    def _attach(self, name: str):
+        shm = self._sync_shm.get(name)
+        if shm is None:
+            from multiprocessing import shared_memory
+            shm = self._sync_shm[name] = shared_memory.SharedMemory(name=name)
+        return shm
+
+    def _release_stale(self, keep) -> None:
+        for name in [n for n in self._sync_shm if n not in keep]:  # tampon réalloué par le principal (lot plus gros)
+            try:
+                self._sync_shm.pop(name).close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def collect(self, runners: List["EnvRunner"], quota: int, weights, hist: Dict[str, Any],
+                sync: Optional[Dict[str, Any]] = None):
         import torch
 
         from .collector import Rollout
@@ -180,14 +202,41 @@ class LocalPolicy:
                                    stack_hist=self.stack_hist)
         ids = list(range(len(runners)))
         cpu = torch.device("cpu")
+        ctrl, slot, gen, obs_buf = None, 0, 0, None
+        if sync is not None:
+            names = {sync["ctrl"]} | ({sync["obs"][0]} if sync.get("obs") else set())
+            self._release_stale(names)
+            ctrl = np.ndarray((int(sync["slots"]) + 1,), dtype=np.int64, buffer=self._attach(sync["ctrl"]).buf)
+            slot, gen = 1 + int(sync["index"]), int(sync["gen"])
+            if sync.get("obs"):
+                name, rows = sync["obs"]
+                dim = int(np.asarray(self.rollout.slots[0].episode.obs).shape[-1])
+                flat = np.ndarray((int(sync["slots"]) * int(rows), dim), dtype=np.float32,
+                                  buffer=self._attach(name).buf)
+                obs_buf = flat[int(sync["index"]) * int(rows):(int(sync["index"]) + 1) * int(rows)]
+        t0 = time.perf_counter()
         collected = 0
-        while collected < quota:
+        while collected < quota and (ctrl is None or int(ctrl[0]) != gen):
             actions = self.rollout.act(ids, self.actor, cpu, self.hist_actor)
             collected += self.rollout.record(ids, [r.step(actions[i]) for i, r in enumerate(runners)])
+            if ctrl is not None:
+                ctrl[slot] = collected
+        t_active = time.perf_counter() - t0
         trajs, episodes = self.rollout.cut()
-        return [t.compact() for t in trajs], episodes, collected
+        out = [t.compact() for t in trajs]
+        if obs_buf is not None:
+            pos = 0
+            for t in out:
+                k = len(t)
+                obs_buf[pos:pos + k] = t.obs
+                t.obs = None
+                pos += k
+        if sync is None:
+            return out, episodes, collected
+        return out, episodes, collected, {"t_active": t_active, "stopped": bool(int(ctrl[0]) == gen)}
 
     def close(self) -> None:
+        self._release_stale(set())
         if self._shm is not None:
             try:
                 self._shm.close()
@@ -233,7 +282,8 @@ def worker_main(conn, cfg: Dict[str, Any], seed: int, worker_id: int, n_envs: Op
                 lo = int(msg[1])
                 conn.send(("ok", [runners[lo + i].step(a) for i, a in enumerate(msg[2])]))
             elif cmd == "collect":
-                conn.send(("ok", policy.collect(runners, int(msg[1]), msg[2], msg[3])))
+                conn.send(("ok", policy.collect(runners, int(msg[1]), msg[2], msg[3],
+                                                 msg[4] if len(msg) > 4 else None)))
             elif cmd == "set_step":
                 for r in runners:
                     r.set_global_step(msg[1])

@@ -651,6 +651,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                 if pending is None:
                     break
                 trajs, episodes, n, t_collect = pending.result()
+                c_stats = dict(getattr(collector, "last_stats", {}))   # avant que la collecte suivante ne l'écrase
                 pending = None
                 # Lancer tout de suite la collecte suivante (poids courants) avant d'apprendre sur ce lot
                 if global_step + n < int(tr["total_steps"]) and not stop_requested["flag"] and not stop_file.exists():
@@ -660,12 +661,14 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                 refresh_collect_actor()
                 trajs, episodes, n, t_collect = collector.collect(collect_actor, scheduled_batch(cfg, global_step)[0],
                                                                   collect_device)
+                c_stats = dict(getattr(collector, "last_stats", {}))
             global_step += n
             iteration += 1
             if curriculum is not None:
                 curriculum.update(episodes)
 
             t0 = time.perf_counter()
+            xla_before = accel.xla_counters(device)
             batch = build_batch(trajs, critic, ret_stats, cfg, device)
             t_batch = time.perf_counter() - t0
             # minibatch du palier du lot collecté (ppo.batch_schedule), sans modifier la config sauvegardée
@@ -686,7 +689,8 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             stats.update(norms.rotation_stats(actor_si, si_before))    # learn/si_norm, learn/si_rot_deg (acteur)
             t_learn = time.perf_counter() - t0
             t_times = {"time/build_batch_s": t_batch, "time/update_prepare_s": stats.pop("t_prepare_s", 0.0),
-                       "time/update_epochs_s": stats.pop("t_epochs_s", 0.0)}
+                       "time/update_epochs_s": stats.pop("t_epochs_s", 0.0),
+                       **accel.xla_delta(xla_before, accel.xla_counters(device))}
 
             hist_results = []
             for e in episodes:
@@ -710,6 +714,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                 "time/collect_s": t_collect, "time/learn_s": t_learn, **t_times,
                 # fin de l'itération précédente (jalons, checkpoints, pool, ladder.json) : hors de sps_total
                 "time/tail_prev_s": t_tail,
+                **c_stats,                         # collecte locale : arrêt global, dispersion des workers
                 "reward/mean_step": float(batch["raw_rewards"].mean()),
                 "reward/scale": float(batch["reward_scale"]),
                 "trajectories": len(trajs), "pool_size": len(pool), "learn/batch_steps": n,
