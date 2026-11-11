@@ -40,20 +40,23 @@ def fly(car):
 
 
 # --------------------------------------------------------------------------- profil
-def test_profile_ends_with_maitrise_and_can_outlive_ten_billion_steps():
+def test_profile_ends_after_maitrise_and_can_outlive_ten_billion_steps():
     cfg = load_config(["kaggle_tpu", "s10"])
     assert cfg["train"]["total_steps"] > 20_000_000_000      # default.yaml : 10 G, atteint en pleine session 4
     assert cfg["ppo"]["gamma"] == 0.995
     w = cfg["env"]["start_weights"]
     assert sum(w.values()) == pytest.approx(1.0) and w["kickoff"] < 0.4 and w["drill_air"] > w["drill_aerial"]
     stages = cfg["curriculum"]["stages"]
-    assert stages[-1]["name"] == "maitrise" and stages[-2]["advance"] and "advance" not in stages[-1]
+    names = [st["name"] for st in stages]
+    assert names[-2:] == ["maitrise", "lucidite"] and all(st.get("advance") for st in stages[:-1])
+    assert "advance" not in stages[-1]
 
 
 def test_maitrise_removes_jump_aids_and_keeps_what_works():
     cfg = load_config(["kaggle_tpu", "s10"])
     c = SkillCurriculum.from_cfg(cfg)
-    prev, last = c.stage_weights[-2], c.stage_weights[-1]
+    i = [st["name"] for st in cfg["curriculum"]["stages"]].index("maitrise")
+    prev, last = c.stage_weights[i - 1], c.stage_weights[i]
     assert last["in_air"] < prev["in_air"] and last["flip_speed"] < prev["flip_speed"]
     assert last["boost_spend"] > 0.0 and last["flip_reset"] > 0.0 and last["kickoff_rush"] > 0.0
     for key in ("goal", "shot", "shot_threat", "vel_ball_to_goal", "vel_player_to_ball", "aerial_touch", "strong_touch"):

@@ -795,7 +795,16 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             signal.signal(sig, h)
 
 
+def utf8_console() -> None:
+    """Sortie console en UTF-8 : sous Windows, une sortie redirigée vers un fichier est en cp1252 et un « → »
+    dans un message (passage de palier) faisait planter le run."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: Optional[List[str]] = None) -> None:
+    utf8_console()
     ap = argparse.ArgumentParser(description="Entraînement de l'agent Rocket League (PPO/SPO)")
     ap.add_argument("--profile", action="append", default=[], help="profil(s) de config : laptop, bigpc, debug…")
     ap.add_argument("--set", action="append", default=[], dest="overrides", help="surcharge clé=valeur")

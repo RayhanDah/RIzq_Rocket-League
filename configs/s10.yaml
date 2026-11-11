@@ -150,6 +150,17 @@ curriculum:
       rewards: {boost_spend: 0.5, in_air: 0.002, flip_speed: 0.1, kickoff_rush: 0.05, flip_reset: 5.0}
       # 0,003 en session 4 : entropie 2,65 → 2,1 en 750 M avant la faille, puis 1,13. Retour à la valeur du palier 5.
       ppo: {ent_coef: 0.005}
+      # Session 6 : critère toujours rempli, on passe au palier 7 dès la reprise (20 itérations, ~8 M steps).
+      advance: {goals_per_min: 0}
+    # Palier 7 « lucidité » (11/11, décision PO). v13535 colle la balle et « commit » sur tout : contre Necto, il laisse
+    # des tirs de loin. Le résultat du match ne faisait que ~17 % du signal (but ±10), les aides centrées sur soi le reste
+    # (`vel_player_to_ball` paie l'approche même quand l'adversaire arrive avant). Inspiré de « goal / concede only » :
+    # le but pèse double (±20, zéro-somme) et encaisser coûte en plus 5 (`concede`, hors zéro-somme) → marquer +20,
+    # encaisser −25 : prendre un risque qui ne rapporte rien coûte. But + encaissement ≈ 33 % du signal au lieu de 17 %.
+    # Un seul changement de jeu, pour qu'il reste attribuable. `aerial_touch` reste coupé (2 dérives en session 5,
+    # v13535 progresse sans lui) : écrit ici en plus de guard.json.
+    - name: lucidite
+      rewards: {goal: 20.0, concede: 5.0, aerial_touch: 0.0}
 selfplay:
   hist_prob: 0.25
   pool_every_steps: 5_000_000
@@ -160,6 +171,8 @@ selfplay:
   # s6 : repère de l'échelle. Les autres : styles différents et forts, le pool récent ne couvre que 100 M steps et les
   # résultats ne sont pas transitifs (v6800 bat v7000 24-6, 8,14 G bat v6800 20-8). v8100 = le bot actuel.
   # v8400 : point de départ de la session 5 (meilleure version mesurée, 59-1-0 et 41-6-13 contre v8100).
+  # v13535 : point de départ de la session 6 et bot actuel (184-10-6 contre v8400) ; mesure l'effet du palier 7.
   anchors: [runs/s6_spo_kaggle, pool/actor_0005315235148.pt, pool/actor_0006800183709.pt, pool/actor_0007000329112.pt,
-            pool/actor_0007565061406.pt, pool/actor_0008100114172.pt, pool/actor_0008400059217.pt]
+            pool/actor_0007565061406.pt, pool/actor_0008100114172.pt, pool/actor_0008400059217.pt,
+            pool/actor_0013535043833.pt]
   anchor_prob: 0.5                 # 12,5 % des épisodes

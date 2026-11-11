@@ -502,3 +502,48 @@ Contre `v8400` échantillonné, l'agent en argmax, 200 matchs (`v8400` contre el
 part des buts > 60 %, duels gagnés dans les deux modes, et pas de recul sur ses acquis (boost > 22, déviations < 30 %,
 flips < 16 / min). À surveiller : vraies aériennes (0,73 / min), kickoffs (première touche perdue 3 fois sur 4 contre
 `v8100`). Puis les matchs du PO dans le vrai jeu.
+
+## 12. Session 6 : palier 7 « lucidité » (11/11/2026)
+
+### Bilan de la session 5
+
+10,88 → 13,54 G en 7,8 h. Le garde-fou s'est déclenché deux fois sur `ladder/drop` (12,66 G → jalon 11,75 ; 13,49 G →
+jalon 12,75, `aerial_touch` coupé). Les deux dérives ont la même forme, plus lente que celle de la session 4 : buts
+2,4 → 0,5 / min, épisodes 25 → 103 s, vraies aériennes 1,4 → 4,7 / min. `aerial_touch` (poids 4, hors zéro-somme)
+y rapporte ~10 par minute, autant que les buts perdus, pour une part de 6 % seulement. **1,65 G steps et 4,8 h
+écartés sur 2,66 G et 7,8 h (62 %).** `v13535` ne descend de `v8400` que par 1,0 G steps, dont 48 M sans `aerial_touch`.
+
+`v13535` (A argmax contre `v8400` échantillonné, 200 matchs) : 184-10-6, 71,7 % des buts (`v8400` contre elle-même :
+55,7 %) ; 63 % en échantillonné. Vrai jeu, un match chacun : All-Star 15-3, `v8100` 10-2, **Necto 1-10**. Détails :
+`runs/s10_ppo_kaggle/RAPPORT.md`. C'est le bot actuel (`bot/model.pt`).
+
+### Le défaut vu par le PO contre Necto
+
+Il colle la balle et « commit » sur tout ; Necto en profite par des tirs forts de loin. En simulation contre `v8400` :
+distance à la balle 1 091 contre 1 191 uu, 22 touches / min contre 19, vitesse inchangée (~1 500 uu/s). Le résultat du
+match ne faisait que ~17 % du signal (but ±10) ; `vel_player_to_ball` (14 %) paie l'approche même quand l'adversaire
+arrive avant, et encaisser ne coûtait pas plus que marquer ne rapporte.
+
+### Ce qui change (inspiré de « goal / concede only »)
+
+- Palier 7 `lucidite` : `goal` 10 → **20** (zéro-somme : encaisser −20) et `concede` **5** (hors zéro-somme) →
+  marquer +20, encaisser **−25**. But et encaissement ≈ 33 % du signal au lieu de 17 %. Un seul changement de jeu.
+- `maitrise` reçoit un critère toujours rempli : passage au palier 7 ~20 itérations après la reprise, poids mélangés
+  sur 100 M steps.
+- `aerial_touch` à 0 dans le palier (en plus de `guard.json`).
+- Ancre `v13535` : `vs_anchor/actor_0013535043833` mesure l'effet du palier.
+- Garde-fou : quota de retours compté par session (la session 5 en a fait 2 ; compté sur le run, le premier
+  déclenchement aurait arrêté la session 6).
+- Boucles : `concede` ne paie qu'à un but encaissé et n'est jamais positif ; `goal` est zéro-somme. Aucune boucle
+  nouvelle (`tests/test_exploits.py`, qui garde aussi les tests d'`aerial_touch` au poids maximal des paliers).
+
+### Critères de la session 6
+
+Contre `v13535` échantillonné, l'agent en argmax, 200 matchs : part des buts > 60 %, sans perdre les buts / min
+(> 1,2). Style : distance à la balle en hausse, arrêts en hausse, buts encaissés en baisse ; à surveiller, un bot trop
+passif (buts / min, touches / min). Puis Necto (audit RocketSim si l'adaptateur est prêt, sinon vrai jeu).
+
+Validation sur portable (copie du run dans `dist/val_s7`) : passage à « lucidité » au bout de 20 itérations, blend
++0,4 % par itération, `concede` payé, entropie stable, pas de retour du garde-fou. Elle a trouvé un plantage : le
+message de passage de palier (« → ») plantait le run sous Windows quand la sortie est redirigée vers un fichier
+(cp1252). `train.main` passe désormais la console en UTF-8 (`tests/test_train_console.py`).
