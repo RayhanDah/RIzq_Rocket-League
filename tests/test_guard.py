@@ -60,7 +60,20 @@ def test_disabled_terms_survive_a_restart_and_zero_the_weight(tmp_path):
     g2 = TrainingGuard(GUARD, tmp_path)
     assert g2.disabled_terms == ["aerial_touch"]
     assert g2.apply({"goal": 10.0, "aerial_touch": 4.0}) == {"goal": 10.0, "aerial_touch": 0.0}
-    assert g2.can_roll_back() and not TrainingGuard({**GUARD, "max_rollbacks": 1}, tmp_path).can_roll_back()
+    assert g2.can_roll_back()
+
+
+def test_rollback_quota_is_per_session(tmp_path):
+    # 11/11 : la session 5 a fait 2 retours avec max_rollbacks 2 ; compté sur tout le run, le premier déclenchement de la
+    # session 6 aurait arrêté le run
+    g = TrainingGuard({**GUARD, "max_rollbacks": 2}, tmp_path)
+    g.record_rollback(12_662, 11_750, "ladder/drop 145 > 120", None, 182)
+    assert g.can_roll_back()
+    g.record_rollback(13_489, 12_750, "ladder/drop 127 > 120", "aerial_touch", 147)
+    assert not g.can_roll_back() and g.session_rollbacks == 2
+    nxt = TrainingGuard({**GUARD, "max_rollbacks": 2}, tmp_path)      # session suivante, même guard.json
+    assert nxt.can_roll_back() and nxt.session_rollbacks == 0
+    assert len(nxt.state["rollbacks"]) == 2 and nxt.disabled_terms == ["aerial_touch"]
 
 
 def test_guard_replayed_on_session_4_fires_before_9_g(tmp_path):

@@ -1,0 +1,28 @@
+#:schema https://rlbot.org/schemas/match.json
+# Match RLBot v5 hors ligne : v13535 contre le meilleur bot du jeu de base (Psyonix All-Star).
+# Lancement : .venv-bot\Scripts\python scripts\run_match.py --config bot/match_v13535_allstar.toml
+[rlbot]
+launcher = "Epic"
+auto_start_agents = true
+wait_for_agents = true
+
+[match]
+game_mode = "Soccar"
+game_map_upk = "Stadium_P"
+skip_replays = true
+enable_rendering = false
+enable_state_setting = false
+
+[mutators]
+match_length = "FiveMinutes"
+
+[[cars]]
+type = "rlbot"
+team = 0
+config_file = "agent_v13535.toml"
+
+[[cars]]
+type = "psyonix"
+team = 1
+skill = "AllStar"
+name = "All-Star"

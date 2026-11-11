@@ -10,8 +10,10 @@ signaux, chacun maintenu `patience` itérations de suite avant de compter :
 
 Quand l'un se déclenche, train.py revient au jalon sain (checkpoint complet gardé tous les `milestone_every_steps`),
 écarte les versions du pool postérieures, et coupe le terme fautif s'il est identifié (poids 0 jusqu'à la fin du run,
-décision notée dans guard.json pour le PO). Au-delà de `max_rollbacks`, arrêt propre. L'état est dans <run>/guard.json :
-il survit aux reprises (sessions Kaggle successives).
+décision notée dans guard.json pour le PO). Au-delà de `max_rollbacks` retours dans la même session (le même processus),
+arrêt propre. L'état est dans <run>/guard.json : il survit aux reprises (sessions Kaggle successives), mais le compte des
+retours repart de zéro à chaque session (11/11 : la session 5 en a fait 2 ; compté sur tout le run, le premier
+déclenchement de la session 6 aurait arrêté le run et laissé la session inutilisée).
 """
 from __future__ import annotations
 
@@ -40,6 +42,7 @@ class TrainingGuard:
         self.state: Dict[str, Any] = {"rollbacks": [], "disabled_terms": [], "manual_rollbacks": [], "milestones": {}}
         if self.path.exists():
             self.state.update(json.loads(self.path.read_text(encoding="utf-8")))
+        self.session_start = len(self.state.get("rollbacks", []))  # retours des sessions précédentes : hors quota
         self.shares: Dict[str, float] = {}
         self.counters: Dict[str, int] = {}
         self.onset: Dict[str, float] = {}
@@ -136,8 +139,12 @@ class TrainingGuard:
     def reference_shares(self, milestone_step: int) -> Optional[Dict[str, float]]:
         return (self.state.get("milestones") or {}).get(str(int(milestone_step)))
 
+    @property
+    def session_rollbacks(self) -> int:
+        return len(self.state.get("rollbacks", [])) - self.session_start
+
     def can_roll_back(self) -> bool:
-        return len(self.state.get("rollbacks", [])) < self.max_rollbacks
+        return self.session_rollbacks < self.max_rollbacks
 
     def record_rollback(self, at_step: int, to_step: int, reason: str, term: Optional[str], rejected: int) -> None:
         self.state.setdefault("rollbacks", []).append(
