@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -75,6 +75,20 @@ def max_arenas(cfg: Dict[str, Any], batch: int) -> int:
     return max(1, int(batch / (seg * agents_per_arena(cfg))))
 
 
+# Règle de choix de la collecte. Les workers ne doivent pas prendre TOUS les vCPU : le processus principal (update
+# sur TPU, GAE, réception des trajectoires) tourne en même temps qu'eux. Session TPU 4 : 168 workers collectaient
+# autant que 222 (174 k contre 175 k steps/s), mais avec 222 l'update prenait 3,8 s en vrai contre 1,3 s mesuré seul.
+# → le moins de workers parmi les candidats à moins de COLLECT_TOL du meilleur débit.
+PICK_RULE = "fewest-workers-within-3pct"
+COLLECT_TOL = 0.03
+
+
+def choose(ok: List["Candidate"]) -> "Candidate":
+    top = max(c.sps for c in ok)
+    near = [c for c in ok if c.sps >= (1.0 - COLLECT_TOL) * top]
+    return min(near, key=lambda c: (c.workers * c.envs, -c.sps))
+
+
 def reusable(out: Path, ncpu: int, gpus: int, batch: int, learners: Optional[str]) -> Optional[str]:
     """Résumé du profil `out` s'il a été mesuré sur la même machine pour le même lot (sinon None)."""
     report = out.with_suffix(".json")
@@ -91,8 +105,25 @@ def reusable(out: Path, ncpu: int, gpus: int, batch: int, learners: Optional[str
         return None
     if learners and learner not in learners.split(","):
         return None
+    if rep.get("rule") != PICK_RULE:           # mesures d'avant la règle actuelle : à re-choisir (rechoose)
+        return None
     return f"{rep.get('best')}, apprentissage {learner}, ~{rep.get('expected_sps', 0):,.0f} steps/s, {rep.get('date', '?')[:16]}"
 
+
+def rechoose(out: Path, ncpu: int, gpus: int, batch: int) -> Optional[Dict[str, Any]]:
+    """Rapport `out`.json d'une session précédente (même machine, même lot) mesuré avec une autre règle de choix :
+    ses mesures, pour refaire le choix sans tout remesurer. None sinon."""
+    report = out.with_suffix(".json")
+    try:
+        rep = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (rep.get("ncpu"), rep.get("gpus"), rep.get("batch")) != (ncpu, gpus, batch) or rep.get("rule") == PICK_RULE:
+        return None
+    learner = str(rep.get("learner", ""))
+    if learner.startswith("xla") and not accel.xla_available():
+        return None
+    return rep
 
 
 def default_candidates(cfg: Dict[str, Any], batch: int, ncpu: int) -> List[Candidate]:
@@ -215,11 +246,16 @@ def main(argv: Optional[List[str]] = None) -> None:
         if previous:
             print(f"[autotune] mesures de la session précédente réutilisées ({previous}) : {args.out}", flush=True)
             return
+    old_rep = rechoose(Path(args.out), ncpu, gpus, batch) if (args.reuse and args.out) else None
 
     # 1) apprentissage
     updates: Dict[str, float] = {}
     lthreads = args.learner_threads or max(1, min(32, ncpu // 3))
-    if not args.skip_learner:
+    if old_rep is not None:
+        updates = {k: float(v) for k, v in old_rep.get("updates_s", {}).items()}
+        print(f"[autotune] mesures du {str(old_rep.get('date', '?'))[:16]} reprises, choix refait ({PICK_RULE})",
+              flush=True)
+    elif not args.skip_learner:
         for dev in (args.learner.split(",") if args.learner else learner_devices()):
             try:
                 t = measure_update(cfg, dev, batch, lthreads if dev == "cpu" else 2)
@@ -228,7 +264,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                       f"→ {batch / t:,.0f} steps/s apprises", flush=True)
             except Exception as err:  # noqa: BLE001 — device absent ou en panne : on continue sans lui
                 print(f"[autotune] update {dev} impossible : {type(err).__name__}: {err}", flush=True)
-    learner = min(updates, key=updates.get) if updates else str(cfg["ppo"]["device"])
+    learner = (str(old_rep["learner"]) if old_rep is not None and old_rep.get("learner")
+               else min(updates, key=updates.get) if updates else str(cfg["ppo"]["device"]))
     t_update = updates.get(learner)
 
     # 2) collecte
@@ -244,7 +281,10 @@ def main(argv: Optional[List[str]] = None) -> None:
                 seen.add(c.label)
                 unique.append(c)
         cands = unique
-    for c in cands:
+    if old_rep is not None:
+        keys = {f.name for f in fields(Candidate)}
+        cands = [Candidate(**{k: v for k, v in c.items() if k in keys}) for c in old_rep.get("candidates", [])]
+    for c in ([] if old_rep is not None else cands):
         try:
             c.sps = measure_collect(cfg, c, args.seconds, args.pool)
             print(f"[autotune] collecte {c.label:38s} → {c.sps:8,.0f} steps/s", flush=True)
@@ -254,7 +294,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     ok = [c for c in cands if c.sps > 0]
     if not ok:
         sys.exit("[autotune] aucune configuration de collecte n'a fonctionné")
-    best = max(ok, key=lambda c: c.sps)
+    best = choose(ok)
+    if best is not max(ok, key=lambda c: c.sps):
+        print(f"[autotune] {best.label} : à moins de {COLLECT_TOL:.0%} du meilleur débit avec moins de workers "
+              "(cœurs laissés au processus principal)", flush=True)
     expected = min(best.sps, batch / t_update) if t_update else best.sps
     print(f"\n[autotune] retenu : apprentissage {learner}, collecte {best.label} "
           f"→ ~{expected:,.0f} steps/s attendus de bout en bout", flush=True)
@@ -279,7 +322,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         out.write_text(header + yaml.safe_dump(profile, sort_keys=False, allow_unicode=True), encoding="utf-8")
         report = {"date": datetime.now().isoformat(), "ncpu": ncpu, "gpus": gpus, "batch": batch,
                   "updates_s": updates, "learner": learner, "candidates": [asdict(c) | {"label": c.label} for c in cands],
-                  "best": best.label, "expected_sps": expected}
+                  "best": best.label, "expected_sps": expected, "rule": PICK_RULE}
         out.with_suffix(".json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
         print(f"[autotune] profil écrit : {out}", flush=True)
     else:

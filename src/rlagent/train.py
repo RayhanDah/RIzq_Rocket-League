@@ -642,6 +642,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         return not last
 
     try:
+        t_tail = 0.0
         if async_collect:
             pending = start_collect()
         while global_step < int(tr["total_steps"]) and not stop_requested["flag"] and not stop_file.exists():
@@ -666,6 +667,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
 
             t0 = time.perf_counter()
             batch = build_batch(trajs, critic, ret_stats, cfg, device)
+            t_batch = time.perf_counter() - t0
             # minibatch du palier du lot collecté (ppo.batch_schedule), sans modifier la config sauvegardée
             stage_ppo = {} if skills is None else {k: v for k, v in skills.ppo_overrides().items() if k == "ent_coef"}
             upd_cfg = {**cfg, "ppo": {**cfg["ppo"], "minibatch_size": scheduled_batch(cfg, global_step - n)[1],
@@ -683,6 +685,8 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             stats["lr_actor"] = adapt_actor_lr(optimizer, stats["kl_final"], cfg)
             stats.update(norms.rotation_stats(actor_si, si_before))    # learn/si_norm, learn/si_rot_deg (acteur)
             t_learn = time.perf_counter() - t0
+            t_times = {"time/build_batch_s": t_batch, "time/update_prepare_s": stats.pop("t_prepare_s", 0.0),
+                       "time/update_epochs_s": stats.pop("t_epochs_s", 0.0)}
 
             hist_results = []
             for e in episodes:
@@ -693,15 +697,19 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             pool.record_results(hist_results)  # scores glissants PFSP / ancres (sans effet si options désactivées)
             if ladder is not None:
                 ladder.record(hist_results, anchors=anchor_ids)
-                if iteration % ladder_fit_every == 0:      # coût en n² : 16 % d'une itération à 1 000 versions
+                if iteration % ladder_fit_every == 0:      # paires jouées seulement, départ des notes précédentes
+                    t_fit = time.perf_counter()
                     ladder.fit()
                     save_best_version(run_dir, ladder)
+                    t_times["time/ladder_fit_s"] = time.perf_counter() - t_fit
 
             metrics = {
                 "global_step": global_step, "iteration": iteration, "elo": elo,
                 "sps_collect": n / max(t_collect, 1e-6),
                 "sps_total": n / max(time.perf_counter() - t_iter, 1e-6),
-                "time/collect_s": t_collect, "time/learn_s": t_learn,
+                "time/collect_s": t_collect, "time/learn_s": t_learn, **t_times,
+                # fin de l'itération précédente (jalons, checkpoints, pool, ladder.json) : hors de sps_total
+                "time/tail_prev_s": t_tail,
                 "reward/mean_step": float(batch["raw_rewards"].mean()),
                 "reward/scale": float(batch["reward_scale"]),
                 "trajectories": len(trajs), "pool_size": len(pool), "learn/batch_steps": n,
@@ -711,6 +719,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                 **pool.metrics(),
                 **({} if ladder is None else ladder.metrics(anchor_ids)),
             }
+            t_tail0 = time.perf_counter()
             if skills is not None:
                 msg = skills.update(metrics, global_step)
                 if msg:
@@ -759,6 +768,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                 next_pool += int(sp["pool_every_steps"])
             if ladder is not None:
                 ladder.save()
+            t_tail = time.perf_counter() - t_tail0
     finally:
         if pending is not None:  # lot en cours de collecte : on attend la fin des workers, puis on l'abandonne
             try:

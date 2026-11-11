@@ -76,7 +76,10 @@ class Ladder:
     def _versions(self) -> List[str]:
         return sorted((p for p, s in self.players.items() if s >= 0), key=lambda p: self.players[p])
 
-    def fit(self, iters: int = 500) -> Dict[str, float]:
+    def fit(self, iters: int = 500, warm: bool = True) -> Dict[str, float]:
+        """Notes Bradley-Terry (MM de Hunter). Calcul sur les seules paires jouées (51 k paires pour 2 182 versions à
+        la session 4, contre 4,7 M cases en matrice pleine : 5 s → quelques ms), même résultat que la matrice pleine.
+        warm=True : départ des notes du calcul précédent (quelques itérations au lieu de centaines)."""
         versions = self._versions()
         if not versions:
             return {}
@@ -85,23 +88,34 @@ class Ladder:
             names.append(CURRENT)
         idx = {n: i for i, n in enumerate(names)}
         n = len(names)
-        wins = np.zeros((n, n))                       # wins[i, j] = score de i contre j (nuls = ½)
+        wins: Dict[Tuple[int, int], float] = {}       # wins[(i, j)] = score de i contre j (nuls = ½)
         for (a, b), (s, g) in self.games.items():
             if a in idx and b in idx:
-                wins[idx[a], idx[b]] += s
-                wins[idx[b], idx[a]] += g - s
-        prior = np.zeros((n, n))
-        prior[(wins + wins.T) > 0] = 1.0              # 1 nul fictif par paire jouée…
+                i, j = idx[a], idx[b]
+                wins[(i, j)] = wins.get((i, j), 0.0) + s
+                wins[(j, i)] = wins.get((j, i), 0.0) + g - s
+        prior = {k for k in wins if wins[k] + wins.get((k[1], k[0]), 0.0) > 0}   # 1 nul fictif par paire jouée…
         chain = versions + ([CURRENT] if CURRENT in idx else [])
         for a, b in zip(chain, chain[1:]):            # … et entre versions successives
-            prior[idx[a], idx[b]] = prior[idx[b], idx[a]] = 1.0
-        wins = wins + prior / 2.0
-        games = wins + wins.T
-        w_tot = wins.sum(axis=1)
-        p = np.ones(n)
+            prior.add((idx[a], idx[b]))
+            prior.add((idx[b], idx[a]))
+        for k in prior:
+            wins[k] = wins.get(k, 0.0) + 0.5
+        keys = list(wins)
+        rows = np.fromiter((k[0] for k in keys), dtype=np.int64, count=len(keys))
+        cols = np.fromiter((k[1] for k in keys), dtype=np.int64, count=len(keys))
+        w = np.fromiter((wins[k] for k in keys), dtype=np.float64, count=len(keys))
+        g = w + np.fromiter((wins.get((k[1], k[0]), 0.0) for k in keys), dtype=np.float64, count=len(keys))
+        w_tot = np.bincount(rows, weights=w, minlength=n)
+        games_tot = np.bincount(rows, weights=g, minlength=n)
         active = w_tot > 0
+        p = np.ones(n)
+        if warm and self.ratings:
+            for name, i in idx.items():
+                if name in self.ratings:
+                    p[i] = 10.0 ** (self.ratings[name] / 400.0)
         for _ in range(iters):
-            denom = (games / (p[:, None] + p[None, :])).sum(axis=1)
+            denom = np.bincount(rows, weights=g / (p[rows] + p[cols]), minlength=n)
             new = np.where(active & (denom > 0), w_tot / np.maximum(denom, 1e-300), p)
             new /= math.exp(np.mean(np.log(new[active]))) if active.any() else 1.0
             if np.max(np.abs(np.log(new[active]) - np.log(p[active]))) < 1e-7:
@@ -110,7 +124,7 @@ class Ladder:
             p = new
         ref = p[idx[versions[0]]]
         self.ratings = {name: float(400.0 * math.log10(p[i] / ref)) for name, i in idx.items()
-                        if active[i] and (games[i].sum() > 0)}
+                        if active[i] and (games_tot[i] > 0)}
         return self.ratings
 
     def n_games(self, player: str) -> float:

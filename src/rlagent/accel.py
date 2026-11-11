@@ -12,10 +12,14 @@ from typing import Any, Dict, Iterable, Optional
 
 import torch
 
-if os.environ.get("PJRT_DEVICE"):
+import multiprocessing
+
+if os.environ.get("PJRT_DEVICE") and multiprocessing.parent_process() is None:
     # Machine XLA (cloud/run_cloud.sh exporte PJRT_DEVICE=TPU) : le runtime XLA doit être initialisé AVANT le premier
     # backward du processus, sinon l'autograd a déjà dimensionné ses files par device sans XLA (« device_ready_queues_ »
-    # au 1er backward sur TPU). Seul le processus principal importe ce module (pas les workers de simulation).
+    # au 1er backward sur TPU). Processus principal seulement : les workers (spawn) réimportent le module principal
+    # (`python -m rlagent.train`, donc ce module) avec PJRT_DEVICE hérité ; à la session TPU 4, chacun des 222 workers
+    # ouvrait ainsi le runtime TPU (223 messages « SliceBuilder port 8471 » dans le journal) pour rien.
     try:
         import torch_xla
         torch_xla.device()

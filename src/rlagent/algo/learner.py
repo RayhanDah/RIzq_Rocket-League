@@ -4,6 +4,7 @@ Même calcul sur CPU, GPU (cuda / xpu) et TPU (xla). Sur TPU, toutes les formes 
 morceau complété, cf. accel.padded_chunks) et chaque pas d'optimiseur se termine par accel.step_barrier."""
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
@@ -12,7 +13,7 @@ from torch import nn
 
 from .. import accel
 from .collector import Trajectory
-from .gae import RunningStats, compute_gae, discounted_returns
+from .gae import RunningStats, batch_gae, segment_discount
 from .losses import policy_loss, ratio_stats
 
 STAT_KEYS = ("policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac", "ratio_dev")
@@ -31,6 +32,52 @@ def batched_values(critic: nn.Module, obs: np.ndarray, device: torch.device, chu
     return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
 
 
+def resident_batch(p: Dict[str, Any], device: torch.device) -> bool:
+    """`ppo.resident_batch` : sur XLA (TPU), le lot est copié UNE fois sur le device, complété à une taille fixe
+    (multiple de device_chunk), et tout se fait là-bas (valeurs, log π_prox, minibatchs tirés par index_select, KL
+    final). Avant : 4 copies hôte → TPU du lot entier par itération (~1,9 Go à 400 k pas) et des sélections de lignes
+    sur un CPU saturé par la collecte. auto = oui sur XLA ; sans effet ailleurs."""
+    if not accel.is_xla(device):
+        return False
+    opt = p.get("resident_batch", "auto")
+    return True if opt in (None, "auto") else bool(opt)
+
+
+class DeviceRows:
+    """Lot de `n` lignes rangé sur le device à `cap` lignes (multiple de `chunk`, forme fixe pour XLA)."""
+
+    def __init__(self, n: int, device: torch.device, chunk: int):
+        self.n, self.chunk, self.device = int(n), int(chunk), torch.device(device)
+        self.cap = max(1, -(-self.n // self.chunk)) * self.chunk
+
+    def put(self, x: Any, dtype: torch.dtype) -> torch.Tensor:
+        return accel.pad_rows(torch.as_tensor(x, dtype=dtype), self.cap).to(self.device)
+
+    def mask(self) -> torch.Tensor:
+        return self.put(np.ones(self.n, np.float32), torch.float32)
+
+    def index(self, idx: torch.Tensor) -> torch.Tensor:
+        """Index (CPU) → device. Taille fixe à l'appel : une seule forme compilée quels que soient les indices."""
+        return idx.to(self.device)
+
+
+@torch.no_grad()
+def resident_values(critic: nn.Module, obs: torch.Tensor, rows: DeviceRows) -> np.ndarray:
+    """V(s) sur tout le lot résident : un seul graphe (morceaux à bornes fixes), une seule lecture vers l'hôte."""
+    critic.eval()
+    v = torch.cat([critic(obs[s:s + rows.chunk]).float() for s in range(0, rows.cap, rows.chunk)])
+    return v.cpu().numpy()[:rows.n]
+
+
+@torch.no_grad()
+def resident_log_probs(actor: nn.Module, obs: torch.Tensor, act: torch.Tensor, rows: DeviceRows) -> torch.Tensor:
+    actor.eval()
+    out = torch.cat([actor.dist(obs[s:s + rows.chunk]).log_prob(act[s:s + rows.chunk]).float()
+                     for s in range(0, rows.cap, rows.chunk)])
+    actor.train()
+    return out
+
+
 def build_batch(trajs: List[Trajectory], critic: nn.Module, ret_stats: RunningStats, cfg: Dict[str, Any],
                 device: torch.device) -> Dict[str, np.ndarray]:
     p = cfg["ppo"]
@@ -40,35 +87,39 @@ def build_batch(trajs: List[Trajectory], critic: nn.Module, ret_stats: RunningSt
     boot_idx = [i for i, t in enumerate(trajs) if t.bootstrap_obs is not None]
     boot_obs = (np.stack([trajs[i].bootstrap_obs for i in boot_idx]).astype(np.float32)
                 if boot_idx else np.zeros((0, obs.shape[1]), np.float32))
-    all_vals = batched_values(critic, np.concatenate([obs, boot_obs]), device, int(p["device_chunk"]))
-    values, boot_vals = all_vals[:len(obs)], all_vals[len(obs):]
+    chunk = int(p["device_chunk"])
+    resident: Dict[str, Any] = {}
+    if resident_batch(p, device):
+        rows = DeviceRows(len(obs), device, chunk)
+        obs_dev = rows.put(obs, torch.float32)                   # la seule copie du lot vers le TPU
+        values = resident_values(critic, obs_dev, rows)
+        boot_vals = batched_values(critic, boot_obs, device, chunk)
+        resident = {"_rows": rows, "_obs_dev": obs_dev}
+    else:
+        all_vals = batched_values(critic, np.concatenate([obs, boot_obs]), device, chunk)
+        values, boot_vals = all_vals[:len(obs)], all_vals[len(obs):]
     boot_map = {i: float(boot_vals[k]) for k, i in enumerate(boot_idx)}
 
     scale = 1.0 / ret_stats.std
-    advs, rets, raw_rewards = [], [], []
-    pos = 0
-    for i, t in enumerate(trajs):
-        n = len(t)
-        r = np.asarray(t.rewards, dtype=np.float32)
-        v = values[pos:pos + n]
-        adv = compute_gae(r * scale, v, boot_map.get(i, 0.0), gamma, lam)
-        advs.append(adv)
-        rets.append(adv + v)
-        raw_rewards.append(r)
-        pos += n
-    # Mise à jour des stats de retour APRÈS usage (l'échelle de ce lot reste cohérente)
-    for r in raw_rewards:
-        ret_stats.update(discounted_returns(r, gamma))
+    lengths = np.fromiter((len(t) for t in trajs), dtype=np.int64, count=len(trajs))
+    raw = np.concatenate([np.asarray(t.rewards, dtype=np.float32) for t in trajs])
+    boot = np.array([boot_map.get(i, 0.0) for i in range(len(trajs))], dtype=np.float64)
+    adv = batch_gae(raw * scale, values, lengths, boot, gamma, lam)     # vectorisée (gae.batch_gae)
+    rets = adv + values
+    # Mise à jour des stats de retour APRÈS usage (l'échelle de ce lot reste cohérente). Une seule fusion de Welford
+    # sur tout le lot = la suite des fusions par trajectoire (même moyenne / variance).
+    ret_stats.update(segment_discount(raw, lengths, gamma))
 
     return {
         "obs": obs,
         "actions": np.concatenate([np.asarray(t.actions, dtype=np.int64) for t in trajs]),
         "log_probs": np.concatenate([np.asarray(t.log_probs, dtype=np.float32) for t in trajs]),
-        "advantages": np.concatenate(advs),
-        "returns": np.concatenate(rets).astype(np.float32),
+        "advantages": adv,
+        "returns": rets.astype(np.float32),
         "values": values.astype(np.float32),
-        "raw_rewards": np.concatenate(raw_rewards),
+        "raw_rewards": raw,
         "reward_scale": np.array(scale, dtype=np.float32),
+        **resident,                                              # XLA : lot déjà sur le device (resident_batch)
     }
 
 
@@ -121,22 +172,58 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optim
     chunk = int(p["device_chunk"])
     src = device if batch_on_device(p, device) else torch.device("cpu")   # où vit le lot
 
+    t_start = time.perf_counter()
     adv = batch["advantages"]
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-    t_obs = torch.as_tensor(batch["obs"], dtype=torch.float32).to(src)
-    t_act = torch.as_tensor(batch["actions"], dtype=torch.long).to(src)
-    t_logp = torch.as_tensor(batch["log_probs"], dtype=torch.float32).to(src)
-    t_adv = torch.as_tensor(adv, dtype=torch.float32).to(src)
-    t_ret = torch.as_tensor(batch["returns"], dtype=torch.float32).to(src)
     behavior_kl = 0.0
-    if decoupled:
-        t_center = batched_log_probs(actor, t_obs, t_act, device, chunk)          # log π_prox
-        log_w = t_center - t_logp
-        behavior_kl = float(((torch.exp(log_w) - 1.0) - log_w).mean())          # retard de la collecte
-        t_w = torch.exp(log_w).clamp(max=float(p.get("is_weight_max", 2.0)))
+    is_max = float(p.get("is_weight_max", 2.0))
+    rows: Optional[DeviceRows] = None
+    if resident_batch(p, device):
+        # Lot résident (XLA) : copié une fois, complété à rows.cap lignes ; les lignes ajoutées ne sont jamais tirées
+        # dans les minibatchs (indices < n) et sont masquées dans les moyennes.
+        rows = batch.get("_rows")
+        t_obs = batch.get("_obs_dev")
+        if rows is None or t_obs is None or rows.n != n or rows.chunk != chunk:
+            rows = DeviceRows(n, device, chunk)
+            t_obs = rows.put(batch["obs"], torch.float32)
+        t_act = rows.put(batch["actions"], torch.long)
+        t_logp = rows.put(batch["log_probs"], torch.float32)
+        t_adv = rows.put(adv, torch.float32)
+        t_ret = rows.put(batch["returns"], torch.float32)
+        if decoupled:
+            t_center = resident_log_probs(actor, t_obs, t_act, rows)                 # log π_prox
+            log_w = t_center - t_logp
+            behavior_kl = float((((torch.exp(log_w) - 1.0) - log_w) * rows.mask()).sum()) / n
+            t_w = torch.exp(log_w).clamp(max=is_max)
+            accel.step_barrier(device)
+        else:
+            t_center, t_w = t_logp, None
     else:
-        t_center, t_w = t_logp, None
+        t_obs = torch.as_tensor(batch["obs"], dtype=torch.float32).to(src)
+        t_act = torch.as_tensor(batch["actions"], dtype=torch.long).to(src)
+        t_logp = torch.as_tensor(batch["log_probs"], dtype=torch.float32).to(src)
+        t_adv = torch.as_tensor(adv, dtype=torch.float32).to(src)
+        t_ret = torch.as_tensor(batch["returns"], dtype=torch.float32).to(src)
+        if decoupled:
+            t_center = batched_log_probs(actor, t_obs, t_act, device, chunk)          # log π_prox
+            log_w = t_center - t_logp
+            behavior_kl = float(((torch.exp(log_w) - 1.0) - log_w).mean())          # retard de la collecte
+            t_w = torch.exp(log_w).clamp(max=is_max)
+        else:
+            t_center, t_w = t_logp, None
+
+    def fetch(idx: torch.Tensor):
+        """Morceau d'indices (CPU) → (obs, actions, log π centre, avantages, retours, poids) sur le device."""
+        if rows is not None:
+            di = rows.index(idx)
+            take = (lambda t: t.index_select(0, di))
+        else:
+            idx = idx.to(src)
+            take = (lambda t: t[idx].to(device, non_blocking=True))
+        return (take(t_obs), take(t_act), take(t_center), take(t_adv), take(t_ret),
+                None if t_w is None else take(t_w))
+
     # Garde-fou (mode adaptive_kl) : si la politique s'est déjà trop éloignée de celle de collecte
     # (KL > kl_stop × target_kl, mesuré avant le pas), on n'applique pas ce pas et on arrête l'itération.
     stop_kl = (float(p.get("kl_stop", 4.0)) * float(p.get("target_kl", 0.01))
@@ -144,6 +231,7 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optim
     check_kl = stop_kl != float("inf")
     early_stop = False
 
+    t_prepared = time.perf_counter()                 # XLA : synchronisé (lecture de behavior_kl) en mode découplé
     actor.train()
     critic.train()
     # Statistiques accumulées sur le device (STAT_KEYS) : une seule lecture par minibatch (garde-fou KL) ou par
@@ -156,21 +244,19 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optim
             break
         perm = torch.randperm(n)
         for s in range(0, n - mb_size + 1, mb_size):
-            mb = perm[s:s + mb_size].to(src)
+            mb = perm[s:s + mb_size]
             optimizer.zero_grad(set_to_none=True)
             acc = torch.zeros(len(STAT_KEYS), dtype=torch.float32, device=device)
             for c in range(0, len(mb), chunk):
                 idx = mb[c:c + chunk]
                 w = len(idx) / len(mb)
-                o = t_obs[idx].to(device, non_blocking=True)
+                o, act, old, a, ret, wi = fetch(idx)
                 dist = actor.dist(o)
-                logp = dist.log_prob(t_act[idx].to(device))
-                old = t_center[idx].to(device)
-                a = t_adv[idx].to(device)
-                pl = policy_loss(logp, old, a, eps, kind, None if t_w is None else t_w[idx].to(device))
+                logp = dist.log_prob(act)
+                pl = policy_loss(logp, old, a, eps, kind, wi)
                 ent = dist.entropy().mean()
                 v = critic(o)
-                vl = torch.nn.functional.mse_loss(v, t_ret[idx].to(device))
+                vl = torch.nn.functional.mse_loss(v, ret)
                 loss = (pl - float(p["ent_coef"]) * ent + float(p["vf_coef"]) * vl) * w
                 loss.backward()
                 lp = logp.detach()
@@ -198,8 +284,13 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optim
     stats["n_minibatches"] = n_mb
     stats["early_stop"] = float(early_stop)
     stats["explained_variance"] = explained_variance(batch["values"], batch["returns"])
-    stats["kl_final"] = final_kl(actor, t_obs, t_act, t_center, device, chunk)
+    stats["kl_final"] = (final_kl(actor, t_obs, t_act, t_center, device, chunk) if rows is None
+                         else resident_final_kl(actor, t_obs, t_act, t_center, rows))
     stats["behavior_kl"] = behavior_kl
+    # durées (train.py les range dans time/) : préparation (copies, log π_prox) puis epochs + KL final (lecture finale
+    # = attente de la fin des calculs sur le device)
+    stats["t_prepare_s"] = t_prepared - t_start
+    stats["t_epochs_s"] = time.perf_counter() - t_prepared
     return stats
 
 
@@ -229,6 +320,32 @@ def final_kl(actor: nn.Module, t_obs: torch.Tensor, t_act: torch.Tensor, t_logp:
         total += float(k3.cpu()[:e - c].sum()) if pad else float(k3.sum())
     actor.train()
     return total / max(1, len(idx))
+
+
+@torch.no_grad()
+def resident_final_kl(actor: nn.Module, t_obs: torch.Tensor, t_act: torch.Tensor, t_logp: torch.Tensor,
+                      rows: DeviceRows, max_samples: int = 8_192) -> float:
+    """final_kl sur le lot résident (même sous-échantillon, même estimateur k3) : indices complétés à un multiple de
+    rows.chunk et masqués, une seule lecture vers l'hôte."""
+    n = rows.n
+    idx = torch.randperm(n)[:max_samples] if n > max_samples else torch.arange(n)
+    m = len(idx)
+    size = max(1, -(-m // rows.chunk)) * rows.chunk
+    full = torch.zeros(size, dtype=torch.long)
+    full[:m] = idx
+    keep = torch.zeros(size, dtype=torch.float32)
+    keep[:m] = 1.0
+    di, dk = rows.index(full), keep.to(rows.device)
+    actor.eval()
+    total = None
+    for c in range(0, size, rows.chunk):
+        sel = di[c:c + rows.chunk]
+        logp = actor.dist(t_obs.index_select(0, sel)).log_prob(t_act.index_select(0, sel))
+        log_ratio = logp - t_logp.index_select(0, sel)
+        part = (((torch.exp(log_ratio) - 1.0) - log_ratio) * dk[c:c + rows.chunk]).sum()
+        total = part if total is None else total + part
+    actor.train()
+    return float(total) / max(1, m)
 
 
 def adapt_actor_lr(optimizer: torch.optim.Optimizer, kl: float, cfg: Dict[str, Any]) -> float:

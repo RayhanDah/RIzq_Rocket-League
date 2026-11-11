@@ -18,7 +18,7 @@ def _tune(tmp_path, **rep):
     out = tmp_path / "autotune.yaml"
     out.write_text("ppo: {device: cpu}\n", encoding="utf-8")
     base = {"date": "2026-11-07T13:44:40", "ncpu": 224, "gpus": 0, "batch": 400_000, "learner": "cpu",
-            "best": "local 222x8", "expected_sps": 174_917}
+            "best": "local 222x8", "expected_sps": 174_917, "rule": autotune.PICK_RULE}
     base.update(rep)
     out.with_suffix(".json").write_text(json.dumps(base), encoding="utf-8")
     return out

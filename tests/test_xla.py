@@ -119,3 +119,52 @@ def test_xla_training_run_checkpoint_and_resume(tmp_path):
     train(cfg, run_dir, ck)
     lines = [json.loads(x) for x in (run_dir / "metrics.jsonl").read_text().splitlines()]
     assert lines[-1]["global_step"] >= 9000
+
+
+def test_spawned_workers_do_not_open_the_xla_runtime(tmp_path, monkeypatch):
+    """Les workers (spawn) héritent de PJRT_DEVICE : ils ne doivent pas initialiser XLA (session TPU 4 : 222 runtimes
+    TPU ouverts pour rien). Fonction du fils dans un module à part : ce fichier-ci importe torch_xla lui-même."""
+    import multiprocessing as mp
+    import sys
+    (tmp_path / "xla_child.py").write_text(
+        "import sys\n"
+        "def run(q):\n"
+        "    import rlagent.accel  # comme un worker qui réimporte le module principal\n"
+        "    q.put('torch_xla' in sys.modules)\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    import xla_child
+    assert "torch_xla" in sys.modules                      # le parent, lui, a XLA
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    p = ctx.Process(target=xla_child.run, args=(q,))
+    p.start()
+    loaded = q.get(timeout=120)
+    p.join(30)
+    assert loaded is False
+
+
+def test_resident_batch_matches_host_batch():
+    """Lot résident sur le device (ppo.resident_batch, défaut sur XLA) = lot copié morceau par morceau."""
+    from rlagent.algo.learner import make_optimizer, ppo_update
+    from rlagent.env.actions import N_ACTIONS
+    from rlagent.models.attention import build_models
+    xla = accel.resolve_device("xla")
+    outs = []
+    for resident in (False, True):
+        cfg = _cfg(resident_batch=resident)
+        torch.manual_seed(0)
+        actor, critic = build_models(cfg, N_ACTIONS)
+        actor.to(xla)
+        critic.to(xla)
+        accel.prepare_models(xla, actor, critic)
+        batch = _batch(cfg, actor, critic, 641, 3)
+        torch.manual_seed(1)
+        stats = ppo_update(actor, critic, make_optimizer(actor, critic, cfg), batch, cfg, xla, decoupled=True)
+        outs.append((batch, stats, [q.detach().cpu() for q in actor.parameters()]))
+    (b0, s0, w0), (b1, s1, w1) = outs
+    assert "_obs_dev" in b1 and "_obs_dev" not in b0
+    np.testing.assert_allclose(b1["values"], b0["values"], rtol=1e-5, atol=1e-6)
+    for k in ("policy_loss", "value_loss", "entropy", "kl_final", "behavior_kl"):
+        assert s1[k] == pytest.approx(s0[k], rel=1e-4, abs=1e-6), k
+    for p, q in zip(w0, w1):
+        assert torch.allclose(p, q, atol=1e-5)
