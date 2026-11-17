@@ -609,3 +609,55 @@ Pourquoi pas de boucle :
   part des buts > 53 % (v13600).
 - Contre v13600 et v13535 : pas de recul (> 55 % des buts).
 - Démos > 0,3 / min, vraies aériennes > 0,4 / min, sans hausse de la durée des épisodes ni chute des buts.
+
+### Résultat de la session 7 (17/11/2026)
+Session 7 : 13,76 → 18,54 G steps, aucun déclenchement du garde-fou, paliers 8 à 10 franchis. Meilleure version :
+v18160. En simulation, elle bat Necto 79-15-6 et v13600 199-0-1. Dans le vrai jeu contre Necto, elle fait 2 victoires
+et 2 défaites, 30-31 aux buts : premières victoires d'une version s10. Les aériennes n'ont pas progressé : 0,13 à 0,19
+vraie aérienne / min, et `aerial_touch` pesait 0,02 % du signal. Rapport : `runs/s10_ppo_kaggle/RAPPORT.md`.
+
+## 14. Session 8 : paliers 11-14 duels aériens, arrêts, bumps, boost (17/11/2026)
+Constat du PO après les 4 matchs contre Necto : la trajectoire est bonne (kickoffs, tirs, premiers buts en bumpant
+le gardien). Mais le bot perd les duels aériens, Necto saute plus haut et marque dans le but vide. Il ne défend pas les
+tirs aériens, vise les gros boosts, et gère mal les bumps et les phases défensives.
+
+Mesures dans la trace du match 1 :
+
+| | Double sauts | Hauteur max | Ticks en boost en l'air |
+|---|---|---|---|
+| v18160 | 0 sur 83 sauts | 312 uu | 2 692 |
+| Necto | 6 | 561 uu | 4 758 |
+
+Consigne du PO : aucun poids ne doit augmenter assez pour créer une boucle ; une session perdue coûte ~5 G steps.
+Méthode des paliers 8-10, avec des poids modestes :
+
+| Palier | Changement | Transition | Passage |
+|---|---|---|---|
+| 11 duel_aerien | `aerial_touch` 1 → 2 (zéro-somme) | 300 M | 600 M steps, buts ≥ 2 / min, au plus 25 Elo sous v18160 |
+| 12 arrets | `save` 0 → 4, zéro-somme, balle adverse seulement | 200 M | 500 M steps, mêmes critères |
+| 13 bump | `bump` 1,3 → 1,8 (zéro-somme) | 200 M | 500 M steps, mêmes critères |
+| 14 boost | `boost_gain` 1 → 0,7 | 200 M | dernier palier |
+
+Hors paliers : `drill_aerial_defense` passe de 5 à 10 % des départs (pris au jeu libre), et v18160 devient une ancre.
+On continue depuis 18,54 G, sans retour en arrière.
+
+Pourquoi pas de boucle (tests/test_exploits.py, test_paliers_11_14.py) :
+- `aerial_touch` : moitié du poids qui avait dérivé en session 5 (4, payé aux deux camps). Il est zéro-somme et
+  borné par vol : un vol rapporte au plus 2 fois sa 1re touche, même en jonglant devant son but.
+  - Une parade en l'air est déjà payée comme une frappe : arrêter une balle qui file vers notre but lui donne de la
+    vitesse vers le but adverse.
+  - L'option « parade » envisagée a donc été retirée : elle n'ajoutait rien.
+- `save` : pousser la balle vers son propre but puis l'arrêter se payait en boucle sans `save_opp_only` (plus d'un
+  but par minute dans le test). Avec l'option, la boucle ne rapporte rien.
+  - Zéro-somme : le tireur arrêté perd ce que gagne le gardien.
+  - Un gros arrêt (3 000 uu/s) vaut 2, soit 10 % d'un but.
+- `bump` : zéro-somme, payé une fois par contact ; 1,8 = 9 % d'un but.
+- `boost_gain` : le poids baisse ; aucun risque de boucle.
+- Garde-fou : `save` et `bump` sont plafonnés à 5 % du signal. Un terme qui dérive revient au poids de la session 7
+  (`aerial_touch` 1, `bump` 1,3, `save` 0). Au pire, la session perd ~250 M steps (un jalon), pas 5 G.
+
+### Critères pour la session 8
+- Vrai jeu contre Necto : au moins 3 victoires sur 4 matchs, et des double sauts et des duels aériens disputés
+  dans la trace.
+- Simulation contre Necto : vraies aériennes > 0,3 / min, part des buts ≥ 67 %.
+- Contre v18160 : > 55 % des buts.

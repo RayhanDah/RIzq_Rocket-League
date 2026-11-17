@@ -287,25 +287,36 @@ class BoostKeepTerm(RewardTerm):
 
 class SaveTerm(RewardTerm):
     """Arrêt : à chaque touche, réduction de la vitesse de la balle VERS NOTRE BUT quand elle y allait (> 500 uu/s,
-    dans notre moitié). Normalisé par la vitesse max de la balle. Complète `shot` (qui paie le renvoi vers l'avant)."""
+    dans notre moitié). Normalisé par la vitesse max de la balle. Complète `shot` (qui paie le renvoi vers l'avant).
+
+    `opp_only` (17/11, palier 12) : seulement si la dernière touche avant celle-ci venait de l'adversaire (ou d'aucune
+    voiture : début d'exercice). Sans lui, pousser la balle vers son propre but puis l'arrêter se paie en boucle
+    (tests/test_exploits.py)."""
     name = "save"
 
-    def __init__(self, min_speed: float = 500.0):
+    def __init__(self, min_speed: float = 500.0, opp_only: bool = False):
         self.min_speed = min_speed
+        self.opp_only = bool(opp_only)
+        self.last_team: Optional[int] = None
         self.prev_ball_vel = np.zeros(3, dtype=np.float32)
         self.prev_ball_pos = np.zeros(3, dtype=np.float32)
 
     def reset(self, agents, state, shared_info):
         self.prev_ball_vel = np.asarray(state.ball.linear_velocity, dtype=np.float32).copy()
         self.prev_ball_pos = np.asarray(state.ball.position, dtype=np.float32).copy()
+        self.last_team = None
 
     def get(self, agents, state, shared_info):
         vel = np.asarray(state.ball.linear_velocity, dtype=np.float32)
         out = {}
+        touched = set()
         for a in agents:
             car = state.cars[a]
             out[a] = 0.0
             if car.ball_touches <= 0:
+                continue
+            touched.add(int(car.team_num))
+            if self.opp_only and self.last_team is not None and self.last_team == car.team_num:
                 continue
             own_goal = _OWN_GOAL if car.team_num == cv.BLUE_TEAM else _OWN_GOAL_ORANGE
             prev_pos = self.prev_ball_pos.tolist()
@@ -314,6 +325,10 @@ class SaveTerm(RewardTerm):
             if in_own_half and before > self.min_speed:
                 after = _dot_dir(vel.tolist(), prev_pos, own_goal)
                 out[a] = max(0.0, before - max(after, 0.0)) / cv.BALL_MAX_SPEED
+        if len(touched) == 1:
+            self.last_team = touched.pop()
+        elif touched:
+            self.last_team = None                            # contact simultané des deux camps
         self.prev_ball_vel = vel.copy()
         self.prev_ball_pos = np.asarray(state.ball.position, dtype=np.float32).copy()
         return out
@@ -504,7 +519,9 @@ class AerialTouchTerm(RewardTerm):
     touches suivantes sans retomber : g × `follow`^k (k = rang dans le vol). Le vol ne se termine qu'au vrai retour au sol
     (roues au sol ou au mur, pas sur la balle). Sans cette option, le ×1,5 puis ×2 des touches enchaînées payait le
     jonglage sur place ~30 / s contre 10 pour un but : l'agent l'a trouvé à 8,7 G et a cessé de marquer (Elo 916 → 270).
-    Avec elle, jongler sur place un vol entier rapporte moins d'une 1re touche (tests/test_exploits.py)."""
+    Avec elle, jongler sur place un vol entier rapporte moins d'une 1re touche (tests/test_exploits.py). Une parade en
+    l'air est payée comme une frappe : arrêter une balle qui file vers notre but, c'est lui ajouter de la vitesse vers le
+    but adverse (test_aerial_save_is_already_paid_like_a_shot)."""
     name = "aerial_touch"
 
     def __init__(self, min_z: float = 220.0, full_z: float = 1720.0, cooldown_s: float = 0.5,
@@ -1011,7 +1028,7 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         AlignBallGoalTerm(),
         InAirTerm(),
         BoostKeepTerm(),
-        SaveTerm(),
+        SaveTerm(opp_only=rc.get("save_opp_only", False)),
         BoostWasteTerm(),
         GoalsideTerm(),
         # s7 (cf. section « rewards s7 ») : potentiels au γ du PPO, pour que r = γΦ(s') − Φ(s) soit exact

@@ -24,8 +24,9 @@ def weights_of(cfg, name):
 # ---------------------------------------------------------------- profil
 def test_one_change_per_stage_after_lucidite(cfg):
     names = [s["name"] for s in cfg["curriculum"]["stages"]]
-    assert names[-4:] == ["lucidite", "kickoff", "demo", "aerien"]
-    luc, ko, demo, air = (weights_of(cfg, n) for n in names[-4:])
+    i = names.index("lucidite")
+    assert names[i:i + 4] == ["lucidite", "kickoff", "demo", "aerien"]
+    luc, ko, demo, air = (weights_of(cfg, n) for n in names[i:i + 4])
     changed = lambda a, b: {k for k in set(a) | set(b) if a.get(k, 0.0) != b.get(k, 0.0)}
     assert changed(luc, ko) == {"kickoff_win", "kickoff_rush", "concede"}     # concede 5 → 2 : décision PO
     assert changed(ko, demo) == {"demo"}
@@ -55,7 +56,7 @@ def test_lucidite_hands_over_and_new_stages_are_slow_and_gated(cfg):
         assert s["advance"]["goals_per_min"] >= 2.0 and "ladder/gap/actor_0013535043833" in s["advance"]
     assert stage(cfg, "kickoff")["advance"]["vs_hist/kickoff_win_rate"] >= 0.5     # kickoffs de nouveau disputés
     assert stage(cfg, "demo")["blend_steps"] >= 200_000_000
-    assert stage(cfg, "aerien")["blend_steps"] >= 300_000_000 and "advance" not in stage(cfg, "aerien")
+    assert stage(cfg, "aerien")["blend_steps"] >= 300_000_000
 
 
 def test_stage_blend_uses_its_own_duration(cfg):
@@ -69,17 +70,17 @@ def test_stage_blend_uses_its_own_duration(cfg):
     assert c.blend(1_100_000_000) == pytest.approx(0.5)  # 200 M, pas les 100 M par défaut
 
 
-def test_session_7_starts_from_v13600(cfg):
-    assert cfg["train"]["rollback_to"] == "pool/actor_0013600266923.pt"
-    assert "pool/actor_0013600266923.pt" in cfg["selfplay"]["anchors"]
+def test_v13600_stays_an_anchor(cfg):
+    assert "pool/actor_0013600266923.pt" in cfg["selfplay"]["anchors"]       # point de départ de la session 7
 
 
 def test_guard_settings(cfg):
     g = cfg["train"]["guard"]
     assert g["min_goals_ratio"] == 0.6 and g["reenable_terms"] == ["aerial_touch"]
-    assert set(g["term_max_share"]) == {"kickoff_win", "kickoff_rush", "demo", "aerial_touch"}
+    assert {"kickoff_win", "kickoff_rush", "demo", "aerial_touch"} <= set(g["term_max_share"])
     assert max(g["term_max_share"].values()) <= 0.08
-    assert g["fallback_weights"] == {"kickoff_win": 3.0, "kickoff_rush": 0.05, "demo": 5.3}  # poids du palier 7
+    fb = g["fallback_weights"]
+    assert [fb[k] for k in ("kickoff_win", "kickoff_rush", "demo")] == [3.0, 0.05, 5.3]     # poids du palier 7
 
 
 # ---------------------------------------------------------------- garde-fou

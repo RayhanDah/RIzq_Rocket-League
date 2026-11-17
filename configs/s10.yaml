@@ -17,8 +17,11 @@ train:
   # v13535 24-15-61, v13600 58-9-33, v13665 6-5-89, v13720 1-1-98. À partir de 13,6 G (lucidité à plein poids),
   # l'agent ne dispute plus les kickoffs (0-7 % de premier contact, Necto marque sur 26 % d'entre eux) ; contre
   # v13535, v13600 vaut presque v13720 (150-17-33 contre 156-15-29).
-  rollback_to: pool/actor_0013600266923.pt
-  rollback_critic_warmup_iters: 50 # le critique de 13,76 G a appris les valeurs de l'évitement : recalé, acteur figé
+  # Session 8 (17/11) : on continue depuis la fin de la session 7 (18,54 G), sans retour en arrière. v18160 (meilleure au
+  # classement) bat v18540 112-60, mais v18540 fait mieux contre Necto (86-7-7 contre 79-15-6) : écart trop faible pour
+  # jeter 380 M steps et le critique qui va avec. v13600 reste dans guard.json (manual_rollbacks) : il ne rejouerait pas.
+  rollback_to: null
+  rollback_critic_warmup_iters: 50
   # Jalons complets (acteur + critique + optimiseur) hors rotation, pour que le garde-fou ait où revenir.
   milestone_every_steps: 250_000_000
   keep_milestones: 8
@@ -32,8 +35,10 @@ train:
   # - 3 retours par session : un par palier nouveau.
   guard: {enabled: true, max_drop: 120.0, max_share: 0.25, min_entropy: 1.5, patience: 60, warmup_iters: 100,
           max_rollbacks: 3, min_goals_ratio: 0.6,
-          term_max_share: {kickoff_win: 0.05, kickoff_rush: 0.05, demo: 0.08, aerial_touch: 0.05},
-          fallback_weights: {kickoff_win: 3.0, kickoff_rush: 0.05, demo: 5.3},
+          # 17/11 (paliers 11-14) : save et bump plafonnés à 5 % comme les autres termes renforcés ; s'ils dérivent,
+          # retour au poids de la session 7 (aerial_touch 1, bump 1,3, save 0).
+          term_max_share: {kickoff_win: 0.05, kickoff_rush: 0.05, demo: 0.08, aerial_touch: 0.05, save: 0.05, bump: 0.05},
+          fallback_weights: {kickoff_win: 3.0, kickoff_rush: 0.05, demo: 5.3, aerial_touch: 1.0, bump: 1.3},
           reenable_terms: [aerial_touch]}
 env:
   # 1v1 uniquement : le match se joue en 1v1 (README) ; 2v2/3v3 plus tard. Les profils FUSIONNENT les dictionnaires :
@@ -44,8 +49,9 @@ env:
   # de replays, on varie les situations. `drill_air` : le vol à partir de la fin du geste (l'exercice `aerial` plafonne à
   # 3,7 %). `drill_reset` : roues face à la balle, pour que le reward `flip_reset` puisse se déclencher.
   # 08/11 : `drill_aerial` retiré (0 % de réussite sur toute la session 4, 3,7 % sur la 3), ses 5 % vont au jeu libre.
-  start_weights: {kickoff: 0.3, random: 0.2, aerial: 0.05, attack_defense: 0.05, drill_air: 0.15, drill_reset: 0.05,
-                  drill_aerial: 0.0, drill_shot: 0.05, drill_wall: 0.05, drill_low_boost: 0.05, drill_aerial_defense: 0.05}
+  # 17/11 (session 8, PO : il ne défend pas les tirs aériens de Necto) : drill_aerial_defense 5 → 10 %, pris au jeu libre.
+  start_weights: {kickoff: 0.3, random: 0.15, aerial: 0.05, attack_defense: 0.05, drill_air: 0.15, drill_reset: 0.05,
+                  drill_aerial: 0.0, drill_shot: 0.05, drill_wall: 0.05, drill_low_boost: 0.05, drill_aerial_defense: 0.10}
   # Plancher 0,4 de l'aérien : balles à 580-890 uu, au-dessus du seuil des rewards aériens et hors de portée d'un simple
   # saut. Vol et reset partent de 0 (leur niveau mesure justement le recul par rapport au geste).
   drill_curriculum: {enabled: true, start: 0.4, min_level: 0.4, step: 0.005, promote: 0.6, demote: 0.3,
@@ -87,7 +93,7 @@ rewards:
   zero_sum: 1.0
   # aerial_touch (14/11, palier 10) : zéro-somme, ce qu'un camp gagne en l'air l'autre le perd. Les deux dérives de la
   # session 5 étaient payées aux deux camps à la fois (~10 / min chacun) ; ici une boucle à deux ne rapporte rien.
-  zero_sum_terms: [goal, vel_ball_to_goal, demo, bump, aerial_touch]
+  zero_sum_terms: [goal, vel_ball_to_goal, demo, bump, aerial_touch, save]
   team_spirit: {start: 0.0, end: 0.0, steps: 1}
   anneal: null                     # aucune décroissance programmée en steps : c'est le curriculum qui décide
   vel_player_to_ball_signed: true
@@ -101,6 +107,7 @@ rewards:
   aerial_useful_speed: 1000.0      # aerial_touch : plein si la touche ajoute 1 000 uu/s vers le but adverse
   aerial_first_floor: 0.25         # 1re touche du vol : un quart payé quelle que soit la direction
   aerial_follow: 0.5               # touches suivantes du même vol : × 0,5 à chaque rang, et seulement vers le but
+  save_opp_only: true              # 17/11 : un arrêt n'est payé que sur une balle envoyée par l'adversaire
   air_approach_until_touch: true   # air_approach : plus rien après la 1re touche du vol
   air_approach_signed: true        # et s'éloigner coûte : l'aller-retour sous la balle ne rapporte rien
   flip_reset_require_spent: true   # flip reset payé seulement si le saut avait été utilisé (pas en rebondissant)
@@ -209,6 +216,38 @@ curriculum:
     - name: aerien
       rewards: {aerial_touch: 1.0}
       blend_steps: 300_000_000
+      advance: {goals_per_min: 0}  # session 8 : palier 11 dès la reprise (20 itérations)
+    # Paliers 11-14 (17/11, décision PO après 4 matchs contre Necto dans le vrai jeu, 2-2, 30-31) : bonne trajectoire,
+    # mais il perd les duels aériens (Necto saute plus haut : dans la trace, 0 double saut sur 83 sauts et 312 uu au plus
+    # pour v18160, 561 uu pour Necto), ne défend pas les tirs aériens, vise les gros boosts, gère mal bumps et défense.
+    # Même méthode que les paliers 8-10 : un changement par palier, 200-300 M steps de transition, 500 M au moins par
+    # palier, passage seulement sans régression (buts ≥ 2 / min, pas plus de 25 Elo sous v18160), plafond de 5 % du
+    # signal par terme renforcé. En fin de session 7, aerial_touch pesait 0,02 % du signal et air_approach 0,3 %.
+    # Palier 11 : aerial_touch 1 → 2 (zéro-somme : c'est un duel, ce que l'un gagne en l'air l'autre le perd). Une
+    # parade en l'air est déjà payée comme une frappe (vitesse rendue vers le but adverse). Bornes du 08/11 inchangées.
+    - name: duel_aerien
+      rewards: {aerial_touch: 2.0}
+      blend_steps: 300_000_000
+      min_steps: 600_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0018160005774: -25}
+    # Palier 12 : arrêts. `save` (vitesse retirée à une balle adverse qui file vers notre but, / 6 000) à 4 : un arrêt
+    # d'une frappe à 3 000 uu/s vaut 2, 10 % d'un but. Zéro-somme : le tireur arrêté perd ce que gagne le gardien.
+    - name: arrets
+      rewards: {save: 4.0}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0018160005774: -25}
+    # Palier 13 : bump 1,3 → 1,8 (zéro-somme : se faire bumper coûte autant). Il commence à marquer en bumpant le gardien.
+    - name: bump
+      rewards: {bump: 1.8}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0018160005774: -25}
+    # Palier 14 : boost_gain 1 → 0,7. Il fait des détours pour les gros pads (Δ√boost : un gros pad à sec vaut 1, un
+    # petit 0,35) ; payé moins, le ramassage ne vaut plus un détour, mais reste payé (√ : plus à sec, plus cher).
+    - name: boost
+      rewards: {boost_gain: 0.7}
+      blend_steps: 200_000_000
 selfplay:
   hist_prob: 0.25
   pool_every_steps: 5_000_000
@@ -222,7 +261,9 @@ selfplay:
   # v13535 : point de départ de la session 6 et bot actuel (184-10-6 contre v8400) ; mesure l'effet du palier 7.
   # v13600 : point de départ de la session 7 ; v13720 : meilleure version de la session 6 au classement (156-15-29
   # contre v13535, mais 1-1-98 contre Necto en simulation). Les deux mesurent l'effet des paliers 8-10.
+  # v18160 : meilleure version de la session 7 et bot actuel (2-2 contre Necto dans le vrai jeu) ; repère des paliers 11-14.
   anchors: [runs/s6_spo_kaggle, pool/actor_0005315235148.pt, pool/actor_0006800183709.pt, pool/actor_0007000329112.pt,
             pool/actor_0007565061406.pt, pool/actor_0008100114172.pt, pool/actor_0008400059217.pt,
-            pool/actor_0013535043833.pt, pool/actor_0013600266923.pt, pool/actor_0013720292116.pt]
+            pool/actor_0013535043833.pt, pool/actor_0013600266923.pt, pool/actor_0013720292116.pt,
+            pool/actor_0018160005774.pt]
   anchor_prob: 0.5                 # 12,5 % des épisodes
