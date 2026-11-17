@@ -503,6 +503,8 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         guard.save()
         print(f"[train] retour à {src.name} (step {int(meta['global_step']):,}) : {n_rej} versions plus récentes "
               f"rangées dans pool/rejected/, critique recalé pendant {critic_warmup} itérations")
+    if guard.reenabled_now:
+        print(f"[train] garde-fou : termes remis en jeu (train.guard.reenable_terms) : {guard.reenabled_now}")
     if guard.disabled_terms:
         print(f"[train] garde-fou : termes coupés par un retour en arrière précédent : {guard.disabled_terms}")
 

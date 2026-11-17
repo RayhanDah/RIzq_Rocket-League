@@ -11,16 +11,30 @@ train:
   init_from: null                  # de zéro
   total_steps: 100_000_000_000     # default.yaml : 10 G, atteint en plein milieu de la session 4 (8,14 G au départ)
   # Session 5 (08/11) : la session 4 a dérivé à partir de 8,7 G (jonglage payé par aerial_touch). On repart de v8400,
-  # la meilleure version mesurée ; les versions plus récentes quittent le pool (pool/rejected/). Une seule fois par run.
-  rollback_to: pool/actor_0008400059217.pt
-  rollback_critic_warmup_iters: 50 # le critique de 10,88 G a appris les valeurs du jonglage : recalé, acteur figé
+  # la meilleure version mesurée ; les versions plus récentes quittent le pool (pool/rejected/). Une seule fois par run
+  # et par version (guard.json, manual_rollbacks).
+  # Session 7 (14/11, décision PO) : retour à v13600. En simulation contre Necto (100 matchs, audits_2026-11-14/) :
+  # v13535 24-15-61, v13600 58-9-33, v13665 6-5-89, v13720 1-1-98. À partir de 13,6 G (lucidité à plein poids),
+  # l'agent ne dispute plus les kickoffs (0-7 % de premier contact, Necto marque sur 26 % d'entre eux) ; contre
+  # v13535, v13600 vaut presque v13720 (150-17-33 contre 156-15-29).
+  rollback_to: pool/actor_0013600266923.pt
+  rollback_critic_warmup_iters: 50 # le critique de 13,76 G a appris les valeurs de l'évitement : recalé, acteur figé
   # Jalons complets (acteur + critique + optimiseur) hors rotation, pour que le garde-fou ait où revenir.
   milestone_every_steps: 250_000_000
   keep_milestones: 8
   # Garde-fou (guard.py) : dérive maintenue 60 itérations (~24 M steps) → retour au meilleur jalon, terme fautif coupé.
   # Session 4 rejouée : ladder/drop passe 120 vers 8,85 G, retour au jalon de 8,5 G au lieu de 2 G steps perdus.
+  # 14/11 (paliers 8-10) :
+  # - plafond de part de 5 % pour les termes renforcés ou remis (la dérive de la session 5 n'a jamais dépassé ~6 %,
+  #   invisible au seuil de 25 %) ; 8 % pour la démo (~2 démos / min à 8 : au-delà, l'agent chasse au lieu de jouer) ;
+  # - retour si les buts / min tombent sous 60 % du meilleur des 4 derniers jalons (session 5 : 2,4 → 0,5) ;
+  # - terme fautif ramené à son ancien poids plutôt qu'à 0 ; aerial_touch remis en jeu une seule fois par run ;
+  # - 3 retours par session : un par palier nouveau.
   guard: {enabled: true, max_drop: 120.0, max_share: 0.25, min_entropy: 1.5, patience: 60, warmup_iters: 100,
-          max_rollbacks: 2}
+          max_rollbacks: 3, min_goals_ratio: 0.6,
+          term_max_share: {kickoff_win: 0.05, kickoff_rush: 0.05, demo: 0.08, aerial_touch: 0.05},
+          fallback_weights: {kickoff_win: 3.0, kickoff_rush: 0.05, demo: 5.3},
+          reenable_terms: [aerial_touch]}
 env:
   # 1v1 uniquement : le match se joue en 1v1 (README) ; 2v2/3v3 plus tard. Les profils FUSIONNENT les dictionnaires :
   # 2 et 3 doivent être mis à 0 explicitement (sinon ceux de default.yaml restent).
@@ -71,7 +85,9 @@ rewards:
   # Recette GigaLearn (exemple officiel), mise à l'échelle but = 10 (÷ 15) : rapides vers la balle, frappes fortes,
   # sauter n'est pas puni (in_air), boost ramassé et gardé, but / balle → but / démos en zéro-somme.
   zero_sum: 1.0
-  zero_sum_terms: [goal, vel_ball_to_goal, demo, bump]
+  # aerial_touch (14/11, palier 10) : zéro-somme, ce qu'un camp gagne en l'air l'autre le perd. Les deux dérives de la
+  # session 5 étaient payées aux deux camps à la fois (~10 / min chacun) ; ici une boucle à deux ne rapporte rien.
+  zero_sum_terms: [goal, vel_ball_to_goal, demo, bump, aerial_touch]
   team_spirit: {start: 0.0, end: 0.0, steps: 1}
   anneal: null                     # aucune décroissance programmée en steps : c'est le curriculum qui décide
   vel_player_to_ball_signed: true
@@ -161,6 +177,38 @@ curriculum:
     # v13535 progresse sans lui) : écrit ici en plus de guard.json.
     - name: lucidite
       rewards: {goal: 20.0, concede: 5.0, aerial_touch: 0.0}
+      # Session 7 : palier 8 dès la reprise (20 itérations).
+      advance: {goals_per_min: 0}
+    # Paliers 8-10 (14/11, décision PO après les matchs contre Necto : 2 buts encaissés sur kickoff, peu de démos,
+    # aériennes en attaque et en défense). Un changement par palier, pour qu'une dérive soit attribuable ; chaque
+    # nouveau poids monte en 100-300 M steps (~15-45 min de TPU) ; on ne passe au suivant qu'après 500 M steps sans
+    # régression (buts ≥ 2 / min, pas sous v13535 au classement). Le garde-fou plafonne chaque terme à 5 % du signal
+    # et le ramène à son ancien poids s'il dérive. Tests : tests/test_exploits.py, tests/test_paliers_8_10.py.
+    # Palier 8 : en simulation, Necto touche le premier dans ~90 % des kickoffs et marque sur 7 à 27 % d'entre eux.
+    # kickoff_win (balle chez l'adversaire à 3 s, ±1, une fois par kickoff, antisymétrique) pesait 0,1 % du signal.
+    # kickoff_rush (vitesse vers la balle jusqu'à la 1re touche, 4 s au plus) : 6 au plus par kickoff.
+    # concede 5 → 2 (décision PO) : marquer +20, encaisser −25 rendait perdant tout duel à 50/50, kickoff compris ;
+    # c'est à plein poids de lucidité que l'agent a cessé de les disputer. Transition en 100 M : l'évitement est
+    # apparu en ~65 M steps à concede 5. On ne passe aux démos qu'une fois les kickoffs de nouveau disputés
+    # (vs_hist/kickoff_win_rate tombé de 0,47 à 0,35 pendant l'effondrement).
+    - name: kickoff
+      rewards: {kickoff_win: 6.0, kickoff_rush: 0.1, concede: 2.0}
+      blend_steps: 100_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0013535043833: 0, vs_hist/kickoff_win_rate: 0.5}
+    # Palier 9 : la démo est payée depuis le palier 1 (5,3, zéro-somme) mais pèse 0,6 % du signal, ~0,1 / min. 8 = 40 %
+    # d'un but (20) : une démo par minute rapporterait 8 / min, contre ~50 / min de buts à 2,5 buts / min.
+    - name: demo
+      rewards: {demo: 8.0}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0013535043833: 0}
+    # Palier 10 : aerial_touch revient au quart de son poids d'avant (1 au lieu de 4), zéro-somme cette fois, avec ses
+    # bornes du 08/11 (payé selon le gain vers le but adverse, une fois par vol ; dégager en l'air compte). Il est
+    # aussi le dernier : s'il dérive, le garde-fou revient au jalon d'avant et le recoupe.
+    - name: aerien
+      rewards: {aerial_touch: 1.0}
+      blend_steps: 300_000_000
 selfplay:
   hist_prob: 0.25
   pool_every_steps: 5_000_000
@@ -172,7 +220,9 @@ selfplay:
   # résultats ne sont pas transitifs (v6800 bat v7000 24-6, 8,14 G bat v6800 20-8). v8100 = le bot actuel.
   # v8400 : point de départ de la session 5 (meilleure version mesurée, 59-1-0 et 41-6-13 contre v8100).
   # v13535 : point de départ de la session 6 et bot actuel (184-10-6 contre v8400) ; mesure l'effet du palier 7.
+  # v13600 : point de départ de la session 7 ; v13720 : meilleure version de la session 6 au classement (156-15-29
+  # contre v13535, mais 1-1-98 contre Necto en simulation). Les deux mesurent l'effet des paliers 8-10.
   anchors: [runs/s6_spo_kaggle, pool/actor_0005315235148.pt, pool/actor_0006800183709.pt, pool/actor_0007000329112.pt,
             pool/actor_0007565061406.pt, pool/actor_0008100114172.pt, pool/actor_0008400059217.pt,
-            pool/actor_0013535043833.pt]
+            pool/actor_0013535043833.pt, pool/actor_0013600266923.pt, pool/actor_0013720292116.pt]
   anchor_prob: 0.5                 # 12,5 % des épisodes

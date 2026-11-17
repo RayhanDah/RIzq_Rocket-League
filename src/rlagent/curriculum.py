@@ -66,9 +66,11 @@ class SkillCurriculum:
         return self.names[self.index]
 
     def blend(self, step: int) -> float:
-        if self.prev_weights is None or self.blend_steps <= 0:
+        """Avancement de la transition vers les poids du palier ; un palier peut fixer sa propre durée (`blend_steps`)."""
+        steps = float(self.stages[self.index].get("blend_steps", self.blend_steps))
+        if self.prev_weights is None or steps <= 0:
             return 1.0
-        return min(max((step - self.stage_start) / self.blend_steps, 0.0), 1.0)
+        return min(max((step - self.stage_start) / steps, 0.0), 1.0)
 
     def weights(self, step: int) -> Dict[str, float]:
         """Poids de rewards à appliquer au step donné (transition linéaire après un changement de palier)."""

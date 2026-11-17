@@ -48,7 +48,7 @@ def test_profile_ends_after_maitrise_and_can_outlive_ten_billion_steps():
     assert sum(w.values()) == pytest.approx(1.0) and w["kickoff"] < 0.4 and w["drill_air"] > w["drill_aerial"]
     stages = cfg["curriculum"]["stages"]
     names = [st["name"] for st in stages]
-    assert names[-2:] == ["maitrise", "lucidite"] and all(st.get("advance") for st in stages[:-1])
+    assert names.index("lucidite") == names.index("maitrise") + 1 and all(st.get("advance") for st in stages[:-1])
     assert "advance" not in stages[-1]
 
 

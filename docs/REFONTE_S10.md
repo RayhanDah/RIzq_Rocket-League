@@ -547,3 +547,65 @@ Validation sur portable (copie du run dans `dist/val_s7`) : passage à « lucidi
 +0,4 % par itération, `concede` payé, entropie stable, pas de retour du garde-fou. Elle a trouvé un plantage : le
 message de passage de palier (« → ») plantait le run sous Windows quand la sortie est redirigée vers un fichier
 (cp1252). `train.main` passe désormais la console en UTF-8 (`tests/test_train_console.py`).
+
+## 13. Session 7 : retour à `v13600`, paliers 8-10 kickoff, démos, aériennes (14/11/2026)
+
+### Ce qu'a donné la session 6 (Kaggle GPU, 13,537 → 13,762 G)
+Contre sa lignée, la session 6 progresse : la meilleure version du classement, `v13720`, bat `v13535` 156-15-29. Dans le
+vrai jeu contre Necto, elle perd 3-12, puis 4-9 une fois le bot corrigé (§ suivant). Le PO relève 3 buts vides manqués,
+2 buts encaissés sur kickoff et 1 contre son camp.
+
+Deux causes trouvées le 14/11 :
+1. **Le bot voyait mal le vrai jeu.** `rlgym_compat` reconstruit faux trois valeurs que le réseau reçoit :
+   `jump_time` (faux 44-49 % du temps : jamais remis à 0 au sol), `air_time_since_jump` (41-44 % : figé après un
+   flip), `is_boosting` (15-33 % : vrai réservoir vide). Corrigé par une copie RocketSim recalée sur le jeu à chaque
+   paquet (`env/shadow_sim.py`, branchée dans `bot/bot.py`) : < 0,3 % d'écart mesuré dans le vrai jeu
+   (`scripts/real_flags_check.py`).
+2. **« Lucidité » à plein poids a appris à ne plus disputer les kickoffs.** Audits contre Necto en simulation
+   (100 matchs, nouveau bloc « kickoff » de `style_audit.py`) :
+
+| Version | V-N-D | buts | 1er contact au kickoff | kickoffs convertis par Necto |
+|---|---|---|---|---|
+| v13535 | 24-15-61 | 46 % | 11 % | 6,8 % |
+| v13600 (lucidité à 62 %) | 58-9-33 | 53 % | 10 % | 19 % |
+| v13665 (lucidité à 100 %) | 6-5-89 | 33 % | 0 % | 27 % |
+| v13720 | 1-1-98 | 26 % | 7 % | 26 % |
+
+Marquer +20 et encaisser −25 rend tout duel à 50/50 perdant d'avance : l'agent laisse le ballon au kickoff. Contre
+lui-même, cela ne coûte presque rien (v13535 ne convertit que 0,7 % de ces kickoffs), contre Necto, c'est fatal.
+v13600 bat v13535 150-17-33, presque autant que v13720.
+
+### Décisions du PO
+- Retour à `v13600` (`train.rollback_to`, critique recalé 50 itérations) : 13,60 → 13,76 G écartés.
+- Kickoff, démos et aériennes introduits lentement, un palier à la fois, sans boucle de reward.
+- `concede` 5 → 2 au palier kickoff (marquer +20, encaisser −22).
+
+### Paliers
+| Palier | Changement | Transition | Passage au suivant |
+|---|---|---|---|
+| 7 lucidité | (inchangé) | — | 20 itérations après la reprise |
+| 8 kickoff | `kickoff_win` 3 → 6, `kickoff_rush` 0,05 → 0,1, `concede` 5 → 2 | 100 M | 500 M steps, buts ≥ 2 / min, pas sous v13535, `vs_hist/kickoff_win_rate` ≥ 0,5 |
+| 9 démo | `demo` 5,3 → 8 (zéro-somme) | 200 M | 500 M steps, buts ≥ 2 / min, pas sous v13535 |
+| 10 aérien | `aerial_touch` 0 → 1, zéro-somme désormais | 300 M | dernier palier |
+
+Pourquoi pas de boucle :
+- `kickoff_win` : ±1 une fois par kickoff, antisymétrique ;
+- `kickoff_rush` : 4 s au plus, soit 6 par kickoff au plus ;
+- `demo` : zéro-somme, 8 = 40 % d'un but ;
+- `aerial_touch` : zéro-somme (les deux dérives de la session 5 payaient les deux camps à la fois), au quart de son
+  ancien poids, avec les bornes du 08/11.
+
+### Garde-fou renforcé (`guard.py`)
+- Plafond de part propre aux termes renforcés : 5 % (`kickoff_win`, `kickoff_rush`, `aerial_touch`), 8 % pour `demo`.
+  La dérive de la session 5 n'a jamais dépassé ~6 %, invisible au seuil général de 25 %.
+- Retour au jalon si les buts / min tombent sous 60 % du meilleur des 4 derniers jalons (session 5 : 2,4 → 0,5).
+- Un terme fautif revient à son ancien poids (`fallback_weights` : démo 5,3, kickoff 3 et 0,05), pas à 0.
+- `aerial_touch` remis en jeu une seule fois par run (`reenable_terms`, noté dans guard.json).
+- Le coupable se cherche d'abord parmi les termes renforcés (part ×2 depuis le jalon).
+- 3 retours par session au lieu de 2.
+
+### Critères pour la session 7
+- Contre Necto en simulation (100 matchs) : premier contact au kickoff > 30 %, kickoffs convertis par Necto < 10 %,
+  part des buts > 53 % (v13600).
+- Contre v13600 et v13535 : pas de recul (> 55 % des buts).
+- Démos > 0,3 / min, vraies aériennes > 0,4 / min, sans hausse de la durée des épisodes ni chute des buts.

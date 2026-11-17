@@ -36,7 +36,7 @@ STRONG_DV = 556.0              # frappe (uu/s), seuil de strong_touch
 
 COUNTERS = ("goals", "touches", "strong_touches", "on_target", "off_target", "spoils", "on_target_balls", "saves",
             "aerial_touches", "true_aerials", "wall_aerials", "aerial_goals", "flip_resets", "bumps", "demos", "flips",
-            "pickups")
+            "pickups", "kickoffs", "kickoff_first_touch", "kickoff_won", "kickoff_goals", "own_goals")
 SUMS = ("speed", "boost", "supersonic", "air", "air_boost", "low_boost", "own_half", "ball_dist", "closer", "steps")
 
 _env = None
@@ -104,6 +104,8 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
         p.on_reset(env.state)
     prev_ball, prev = fresh()
     last_touch = None
+    first_touch, kickoff_judged = None, False
+    KICKOFF_EVAL_S, KICKOFF_GOAL_S = 3.0, 5.0      # comme le reward kickoff_win ; but « sur kickoff » avant 5 s
     t = 0.0
     spawn = lambda: tuple(tuple(np.round(c.physics.position[:2]).tolist()) for c in env.state.cars.values())
     episodes, ep_start, ep_steps = [], spawn(), 0
@@ -153,6 +155,8 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
                 p["air_boost"] += _tick_s
             if goal_threat(*prev_ball, sign) > 0.0:
                 d["on_target_balls"] += car.ball_touches > 0
+            if car.ball_touches > 0 and first_touch is None:
+                first_touch = side_of[car.team_num]
             if car.ball_touches > 0:
                 last_touch = (side_of[car.team_num], (not ground) and pos[2] > AERIAL_Z
                               and p["air_boost"] >= AIR_BOOST_S)
@@ -179,8 +183,22 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
         prev_ball = (pos, vel)
         ep_steps += 1
         scored = any(term.values())
+        if not kickoff_judged and (scored or ep_steps * _tick_s >= KICKOFF_EVAL_S):
+            kickoff_judged = True                   # balle dans le camp adverse à 3 s (ou but avant) : kickoff gagné
+            for s_ in "AB":
+                st[s_]["kickoffs"] += 1
+            if first_touch is not None:             # premier contact dans les 3 s (ou avant le but)
+                st[first_touch]["kickoff_first_touch"] += 1
+            if scored:
+                st[side_of[state.scoring_team]]["kickoff_won"] += 1
+            elif abs(pos[1]) > 0.0:
+                st[side_of[0] if pos[1] > 0 else side_of[1]]["kickoff_won"] += 1
         if scored:
             st[side_of[state.scoring_team]]["goals"] += 1
+            if ep_steps * _tick_s <= KICKOFF_GOAL_S:
+                st[side_of[state.scoring_team]]["kickoff_goals"] += 1
+            if last_touch and last_touch[0] != side_of[state.scoring_team]:
+                st[last_touch[0]]["own_goals"] += 1
             if last_touch and last_touch[1] and last_touch[0] == side_of[state.scoring_team]:
                 st[last_touch[0]]["aerial_goals"] += 1
         if scored or any(trunc.values()):
@@ -191,6 +209,7 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
             prev_ball, prev = fresh()
             last_touch = None
             ep_start, ep_steps = spawn(), 0
+            first_touch, kickoff_judged = None, False
     st["episodes"] = episodes       # (placement au kickoff, buteur, durée) : diversité des parties
     return st
 
@@ -220,6 +239,10 @@ def summarize(d: dict) -> dict:
                      "deviations/min": per_min("spoils"),
                      "deviations_%_balles_cadrees": 100 * d["spoils"] / max(1, d["on_target_balls"]),
                      "arrets/min": per_min("saves")},
+        "kickoff": {"kickoffs": d["kickoffs"], "premier_contact_%": 100 * d["kickoff_first_touch"] / max(1, d["kickoffs"]),
+                    "gagnes_a_3s_%": 100 * d["kickoff_won"] / max(1, d["kickoffs"]),
+                    "buts_sur_kickoff_%": 100 * d["kickoff_goals"] / max(1, d["kickoffs"]),
+                    "csc/min": per_min("own_goals")},
         "aerien": {"touches_aeriennes/min": per_min("aerial_touches"), "vraies_aeriennes/min": per_min("true_aerials"),
                    "depuis_mur/min": per_min("wall_aerials"), "buts_aeriens/min": per_min("aerial_goals"),
                    "flip_resets/min": per_min("flip_resets"),
@@ -271,7 +294,7 @@ def main():
     if is_necto_spec(args.a) or is_necto_spec(args.b):
         res["necto_fidelite"] = fidelity_report()
         print("--- Necto (adaptateur RocketSim)\n" + res["necto_fidelite"]["texte"])
-    for block in ("rush", "finition", "aerien"):
+    for block in ("rush", "finition", "kickoff", "aerien"):
         print(f"--- {block}" + " " * 22 + "A        B")
         for k in res["A"][block]:
             print(f"{k:30s} {res['A'][block][k]:8.2f} {res['B'][block][k]:8.2f}")
