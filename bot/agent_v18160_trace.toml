@@ -1,0 +1,14 @@
+#:schema https://rlbot.org/schemas/agent.json
+# Version v18160 de s10 (session 7) en argmax, avec trace des paquets pour vérifier les obs après le match.
+[settings]
+agent_id = "ensisa/rlagent/v18160_trace"
+name = "v18160"
+run_command = "..\\.venv-bot\\Scripts\\python.exe bot.py ..\\runs\\s10_ppo_kaggle\\actor_0018160005774.pt ..\\runs\\s10_ppo_kaggle\\real_2026-11-17\\trace_v18160_necto.jsonl"
+run_command_linux = "../.venv-bot/bin/python bot.py ../runs/s10_ppo_kaggle/actor_0018160005774.pt ../runs/s10_ppo_kaggle/real_2026-11-17/trace_v18160_necto.jsonl"
+hivemind = false
+
+[details]
+description = "s10, version v18160 (session 7). Hors ligne uniquement."
+developer = "Équipe projet RL — ENSISA"
+language = "rlgym"
+tags = ["1v1"]

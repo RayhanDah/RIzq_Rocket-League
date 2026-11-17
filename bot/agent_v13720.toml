@@ -1,0 +1,14 @@
+#:schema https://rlbot.org/schemas/agent.json
+# Version v13720 de s10 en argmax : même bot que bot.toml, avec le modèle du pool passé en argument à bot.py.
+[settings]
+agent_id = "ensisa/rlagent/v13720"
+name = "v13720"
+run_command = "..\\.venv-bot\\Scripts\\python.exe bot.py ..\\runs\\s10_ppo_kaggle_s6\\pool\\actor_0013720292116.pt"
+run_command_linux = "../.venv-bot/bin/python bot.py ../runs/s10_ppo_kaggle_s6/pool/actor_0013720292116.pt"
+hivemind = false
+
+[details]
+description = "s10, version v13720. Hors ligne uniquement."
+developer = "Équipe projet RL — ENSISA"
+language = "rlgym"
+tags = ["1v1"]

@@ -8,6 +8,8 @@ ou dans le fichier passé en argument (relatif à bot/), pour faire jouer une au
 """
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from rlgym_rlbot import RLGymBot, RLGymBotConfig  # noqa: E402
 
 from rlagent.env.actions import make_action_parser  # noqa: E402
 from rlagent.env.obs import BALL_PRED_DIM, RACE_DIM, SELF_DIM, AttentionObs  # noqa: E402
+from rlagent.env.shadow_sim import ShadowSim, init_rocketsim, patch_compat_cars  # noqa: E402
 from rlagent.train import build_actor_from_model_cfg  # noqa: E402
 
 
@@ -47,6 +50,40 @@ class Agent:
         return np.array([int(action.item())])
 
 
+CAR_FLAGS = ("on_ground", "is_jumping", "has_jumped", "has_flipped", "is_flipping", "has_double_jumped", "can_flip",
+             "has_flip", "air_time_since_jump", "jump_time", "handbrake", "is_holding_jump", "is_boosting", "flip_time")
+
+
+def _v(v) -> list:
+    return [v.x, v.y, v.z]
+
+
+class Tracer:
+    """Journal tick par tick (2e argument de bot.py) : état du paquet RLBot et indicateurs que le bot en déduit
+    (rlgym_compat), pour les comparer à RocketSim (scripts/real_flags_check.py)."""
+
+    def __init__(self, path: Path):
+        self.f = open(path, "w", encoding="utf-8")
+        self.n = 0
+
+    def record(self, packet, state) -> None:
+        players = []
+        for p in packet.players:
+            ph, li = p.physics, p.last_input
+            players.append({"team": p.team, "pos": _v(ph.location), "rot": [ph.rotation.pitch, ph.rotation.yaw,
+                            ph.rotation.roll], "vel": _v(ph.velocity), "ang": _v(ph.angular_velocity),
+                            "boost": p.boost, "air": int(p.air_state), "hj": p.has_jumped, "hdj": p.has_double_jumped,
+                            "hd": p.has_dodged, "dto": p.dodge_timeout, "de": p.dodge_elapsed,
+                            "demo": p.demolished_timeout,
+                            "in": [li.throttle, li.steer, li.pitch, li.yaw, li.roll, li.jump, li.boost, li.handbrake]})
+        cars = {str(c.team_num): [float(getattr(c, k)) for k in CAR_FLAGS] for c in state.cars.values()}
+        self.f.write(json.dumps({"f": packet.match_info.frame_num, "phase": int(packet.match_info.match_phase),
+                                 "p": players, "c": cars}) + "\n")
+        self.n += 1
+        if self.n % 240 == 0:
+            self.f.flush()
+
+
 class RLAgentBot(RLGymBot):
     def __init__(self):
         # argmax : mêmes poids, sans le bruit de l'échantillonnage (s10, 04/11 : 24-8-8 contre la version échantillonnée)
@@ -60,6 +97,32 @@ class RLAgentBot(RLGymBot):
             # Valeurs par défaut du wrapper = RocketSimEngine(rlbot_delay=True), comme à l'entraînement.
             config=RLGymBotConfig(),
         )
+
+    def initialize(self):
+        super().initialize()
+        # Copie RocketSim recalée sur le jeu (env/shadow_sim.py) : jump_time, air_time_since_jump et is_boosting
+        # tels qu'à l'entraînement (rlgym_compat les reconstruit mal). RLAGENT_NO_SHADOW=1 pour s'en passer.
+        shadow = None
+        if os.environ.get("RLAGENT_NO_SHADOW") != "1":
+            init_rocketsim(HERE.parent / "collision_meshes")
+            shadow = ShadowSim()
+        tracer = Tracer(HERE / sys.argv[2]) if len(sys.argv) > 2 else None
+        if shadow is None and tracer is None:
+            return
+        # GameState a des __slots__ : on enveloppe la méthode de la classe (ce processus seulement)
+        cls = type(self.latest_game_state)
+        update = cls.update
+
+        def wrapped(gs, packet, extra_info=None):
+            update(gs, packet, extra_info)
+            if gs is not self.latest_game_state:
+                return
+            if shadow is not None:
+                patch_compat_cars(gs, packet, shadow.update(packet))
+            if tracer is not None:
+                tracer.record(packet, gs)
+
+        cls.update = wrapped
 
     def get_action(self, obs, game_state, packet):
         return self.agent.act(obs)
