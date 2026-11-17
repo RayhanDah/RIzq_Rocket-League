@@ -35,9 +35,10 @@ train:
   # - 3 retours par session : un par palier nouveau.
   guard: {enabled: true, max_drop: 120.0, max_share: 0.25, min_entropy: 1.5, patience: 60, warmup_iters: 100,
           max_rollbacks: 3, min_goals_ratio: 0.6,
-          # 17/11 (paliers 11-14) : save et bump plafonnés à 5 % comme les autres termes renforcés ; s'ils dérivent,
-          # retour au poids de la session 7 (aerial_touch 1, bump 1,3, save 0).
-          term_max_share: {kickoff_win: 0.05, kickoff_rush: 0.05, demo: 0.08, aerial_touch: 0.05, save: 0.05, bump: 0.05},
+          # 17/11 (paliers 11-14) : save et bump plafonnés à 5 % comme les autres termes renforcés, small_pad à 3 % ;
+          # s'ils dérivent, retour au poids de la session 7 (aerial_touch 1, bump 1,3, save 0, small_pad 0).
+          term_max_share: {kickoff_win: 0.05, kickoff_rush: 0.05, demo: 0.08, aerial_touch: 0.05, save: 0.05, bump: 0.05,
+                           small_pad: 0.03},
           fallback_weights: {kickoff_win: 3.0, kickoff_rush: 0.05, demo: 5.3, aerial_touch: 1.0, bump: 1.3},
           reenable_terms: [aerial_touch]}
 env:
@@ -243,10 +244,12 @@ curriculum:
       blend_steps: 200_000_000
       min_steps: 500_000_000
       advance: {goals_per_min: 2.0, ladder/gap/actor_0018160005774: -25}
-    # Palier 14 : boost_gain 1 → 0,7. Il fait des détours pour les gros pads (Δ√boost : un gros pad à sec vaut 1, un
-    # petit 0,35) ; payé moins, le ramassage ne vaut plus un détour, mais reste payé (√ : plus à sec, plus cher).
-    - name: boost
-      rewards: {boost_gain: 0.7}
+    # Palier 14 (PO, 18/11 : il va sur les gros pads et ne comprend pas les petits ; le ramassage reste payé comme avant).
+    # `boost_gain` (Δ√boost) paie un gros pad ~4 fois un petit : à 30 de boost, 0,45 contre 0,10. `small_pad` ajoute
+    # 0,1 par petit pad (Δboost / 12, gains ≤ 13 seulement) : le petit pad pris sur le chemin vaut ~0,2, le gros ne change
+    # pas. ~10 petits pads / min = 1 / min, 5 % d'un but ; rouler en boostant pour les reprendre coûte `boost_spend`.
+    - name: petits_pads
+      rewards: {small_pad: 0.1}
       blend_steps: 200_000_000
 selfplay:
   hist_prob: 0.25

@@ -636,7 +636,7 @@ Méthode des paliers 8-10, avec des poids modestes :
 | 11 duel_aerien | `aerial_touch` 1 → 2 (zéro-somme) | 300 M | 600 M steps, buts ≥ 2 / min, au plus 25 Elo sous v18160 |
 | 12 arrets | `save` 0 → 4, zéro-somme, balle adverse seulement | 200 M | 500 M steps, mêmes critères |
 | 13 bump | `bump` 1,3 → 1,8 (zéro-somme) | 200 M | 500 M steps, mêmes critères |
-| 14 boost | `boost_gain` 1 → 0,7 | 200 M | dernier palier |
+| 14 petits_pads | `small_pad` 0 → 0,1 : +0,1 par petit pad, en plus de `boost_gain` (inchangé, 1) | 200 M | dernier palier |
 
 Hors paliers : `drill_aerial_defense` passe de 5 à 10 % des départs (pris au jeu libre), et v18160 devient une ancre.
 On continue depuis 18,54 G, sans retour en arrière.
@@ -652,7 +652,12 @@ Pourquoi pas de boucle (tests/test_exploits.py, test_paliers_11_14.py) :
   - Zéro-somme : le tireur arrêté perd ce que gagne le gardien.
   - Un gros arrêt (3 000 uu/s) vaut 2, soit 10 % d'un but.
 - `bump` : zéro-somme, payé une fois par contact ; 1,8 = 9 % d'un but.
-- `boost_gain` : le poids baisse ; aucun risque de boucle.
+- `small_pad` : borné par les pads (4 s de réapparition), et brûler du boost au sol pour les reprendre coûte
+  `boost_spend`. Tourner sur des petits pads à 1 / s pendant une minute (plus vite que le terrain ne le permet)
+  rapporte 8,4 : 0,42 but, dont 2,4 déjà payés sans `small_pad`, et il faut cesser de jouer (test).
+  Plafond de 3 % du signal au garde-fou.
+- Première version du 17/11 : `boost_gain` 1 → 0,7. Corrigée le 18/11 avant le départ de la session : le PO voulait que
+  le bot apprenne les petits pads, pas que le ramassage paie moins.
 - Garde-fou : `save` et `bump` sont plafonnés à 5 % du signal. Un terme qui dérive revient au poids de la session 7
   (`aerial_touch` 1, `bump` 1,3, `save` 0). Au pire, la session perd ~250 M steps (un jalon), pas 5 G.
 

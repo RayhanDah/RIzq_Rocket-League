@@ -7,7 +7,7 @@ from rlagent.config import load_config
 from rlagent.curriculum import SkillCurriculum
 
 V18160 = "pool/actor_0018160005774.pt"
-NEW = ["duel_aerien", "arrets", "bump", "boost"]
+NEW = ["duel_aerien", "arrets", "bump", "petits_pads"]
 
 
 @pytest.fixture(scope="module")
@@ -35,17 +35,18 @@ def test_stages_follow_aerien_one_change_each(cfg):
     assert changed(w["aerien"], w["duel_aerien"]) == {"aerial_touch"}
     assert changed(w["duel_aerien"], w["arrets"]) == {"save"}
     assert changed(w["arrets"], w["bump"]) == {"bump"}
-    assert changed(w["bump"], w["boost"]) == {"boost_gain"}
+    assert changed(w["bump"], w["petits_pads"]) == {"small_pad"}
 
 
 def test_new_weights_stay_modest(cfg):
     w = weights(cfg)
-    last, before = w["boost"], w["aerien"]
+    last, before = w["petits_pads"], w["aerien"]
     goal = last["goal"]
     assert last["aerial_touch"] <= 2.0 * before["aerial_touch"]       # ×2 au plus, sous les 4 de la session 5
     assert last["save"] * 0.5 <= 0.1 * goal                           # un gros arrêt : 10 % d'un but au plus
     assert last["bump"] <= 1.5 * before["bump"] and last["bump"] <= 0.1 * goal
-    assert last["boost_gain"] < before["boost_gain"]
+    assert last["boost_gain"] == before["boost_gain"]                 # PO : le ramassage reste payé comme avant
+    assert last["small_pad"] <= 0.1
 
 
 def test_duels_are_zero_sum_and_saves_guarded(cfg):
@@ -72,7 +73,7 @@ def test_session_8_continues_without_rollback_and_measures_against_v18160(cfg):
 
 def test_guard_caps_the_new_terms(cfg):
     g = cfg["train"]["guard"]
-    assert {"aerial_touch", "save", "bump"} <= set(g["term_max_share"])
+    assert {"aerial_touch", "save", "bump", "small_pad"} <= set(g["term_max_share"])
     assert max(g["term_max_share"].values()) <= 0.08
     assert g["fallback_weights"]["aerial_touch"] == 1.0 and g["fallback_weights"]["bump"] == 1.3
 

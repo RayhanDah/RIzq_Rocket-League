@@ -143,6 +143,32 @@ class BoostGainTerm(RewardTerm):
         return out
 
 
+class SmallPadTerm(RewardTerm):
+    """Petit pad ramassé (17/11, palier 14, demande du PO : il ne va que sur les gros pads). +Δboost / 12 pour un gain de
+    boost d'au plus `max_gain` (un petit pad donne 12 ; un gros pad, une réapparition ou un kickoff donnent plus et ne
+    comptent pas). Compte en plus de `boost_gain` (Δ√boost), qui paie un gros pad à sec ~4 fois un petit : ici, le petit
+    pad pris sur le chemin vaut enfin un peu. Borné par les pads (4 s de réapparition) et par `boost_spend`, qui fait
+    payer le boost brûlé au sol pour les reprendre (tests/test_exploits.py)."""
+    name = "small_pad"
+
+    def __init__(self, max_gain: float = 13.0):
+        self.max_gain = float(max_gain)
+        self.prev: Dict[str, float] = {}
+
+    def reset(self, agents, state, shared_info):
+        self.prev = {a: state.cars[a].boost_amount for a in agents}
+
+    def get(self, agents, state, shared_info):
+        out = {}
+        for a in agents:
+            car = state.cars[a]
+            b = float(car.boost_amount)
+            gain = b - self.prev.get(a, b)
+            self.prev[a] = b
+            out[a] = min(gain, 12.0) / 12.0 if 0.0 < gain <= self.max_gain and not car.is_demoed else 0.0
+        return out
+
+
 class BoostSpendTerm(RewardTerm):
     """Dépense de boost près du sol (palier 6, recette de Necto) : Δ√boost (négatif), atténué avec la hauteur, nul à partir
     de la barre : le vol reste gratuit. `boost_gain` ne paie que les gains et paie plus à sec : sans ce terme, brûler son
@@ -1056,6 +1082,8 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         ShotThreatPotential(gamma, floor=rc.get("shot_threat_floor", 0.5)),
         # palier 6 « maitrise » (06/11/2026)
         BoostSpendTerm(),
+        # palier 14 « petits_pads » (17/11/2026)
+        SmallPadTerm(),
         FlipResetTerm(cooldown_s=rc.get("flip_reset_cooldown_s", 1.0),
                       require_spent=rc.get("flip_reset_require_spent", False),
                       max_per_flight=rc.get("flip_reset_max_per_flight"), follow=rc.get("flip_reset_follow", 0.5)),
