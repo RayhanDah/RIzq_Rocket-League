@@ -1,0 +1,14 @@
+#:schema https://rlbot.org/schemas/agent.json
+# Version v22650 de s10 (session 8) en argmax (sans trace).
+[settings]
+agent_id = "ensisa/rlagent/v22650"
+name = "v22650"
+run_command = "..\\.venv-bot\\Scripts\\python.exe bot.py ..\\runs\\s10_ppo_kaggle\\actor_0022650369229.pt"
+run_command_linux = "../.venv-bot/bin/python bot.py ../runs/s10_ppo_kaggle/actor_0022650369229.pt"
+hivemind = false
+
+[details]
+description = "s10, version v22650 (session 8). Hors ligne uniquement."
+developer = "Équipe projet RL — ENSISA"
+language = "rlgym"
+tags = ["1v1"]
