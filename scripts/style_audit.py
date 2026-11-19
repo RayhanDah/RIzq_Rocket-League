@@ -76,7 +76,7 @@ def actor(spec: str):
     return _actors[spec]
 
 
-def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
+def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = False, stale: float = 0.0):
     import torch
 
     from rlagent.env.common import is_flip_reset
@@ -109,6 +109,7 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
     t = 0.0
     spawn = lambda: tuple(tuple(np.round(c.physics.position[:2]).tolist()) for c in env.state.cars.values())
     episodes, ep_start, ep_steps = [], spawn(), 0
+    last_actions = {}                      # --stale : action précédente rejouée, comme un paquet RLBot en retard
     while t < GAME_S:
         actions = {}
         for side in "AB":
@@ -119,9 +120,14 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
                 continue
             x = torch.as_tensor(np.stack([obs[ag] for ag in agents]), dtype=torch.float32)
             with torch.no_grad():
-                act, _ = pol[side].act(x, deterministic=(det_a and side == "A"))
+                act, _ = pol[side].act(x, deterministic=(det_a if side == "A" else det_b))
             for ag, a in zip(agents, act.numpy()):
                 actions[ag] = np.array([a])
+        if stale > 0.0:
+            for ag in actions:
+                if ag in last_actions and np.random.random() < stale:
+                    actions[ag] = last_actions[ag]
+            last_actions = dict(actions)
         obs, _, term, trunc = env.step(actions)
         t += _tick_s
         state = env.state
@@ -214,12 +220,12 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool):
     return st
 
 
-def task(config, spec_a, spec_b, det_a, seed, n_games):
+def task(config, spec_a, spec_b, det_a, seed, n_games, det_b=False, stale=0.0):
     import torch
     setup(config)
     torch.manual_seed(seed)
     np.random.seed(seed % 2**31)
-    return [play_game(spec_a, spec_b, g % 2, det_a) for g in range(n_games)]
+    return [play_game(spec_a, spec_b, g % 2, det_a, det_b, stale) for g in range(n_games)]
 
 
 def summarize(d: dict) -> dict:
@@ -261,12 +267,15 @@ def main():
     ap.add_argument("--b", required=True)
     ap.add_argument("--det-a", action="store_true",
                     help="A en argmax (comme le bot) ; B reste échantillonné (sauf necto : argmax, necto:<beta> sinon)")
+    ap.add_argument("--det-b", action="store_true", help="B aussi en argmax (deux bots comme dans le vrai jeu)")
+    ap.add_argument("--stale", type=float, default=0.0,
+                    help="probabilité par step et par voiture de rejouer l'action précédente (bruit du vrai jeu)")
     ap.add_argument("--games", type=int, default=40)
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--config", default=str(ROOT / "runs/s10_ppo_kaggle/config.yaml"))
     ap.add_argument("--out", default=None, help="résumé JSON")
     args = ap.parse_args()
-    tasks = [(args.config, args.a, args.b, args.det_a, 1000 + c, min(CHUNK, args.games - c))
+    tasks = [(args.config, args.a, args.b, args.det_a, 1000 + c, min(CHUNK, args.games - c), args.det_b, args.stale)
              for c in range(0, args.games, CHUNK)]
     total = {s: {k: 0.0 for k in COUNTERS + SUMS} for s in "AB"}
     wins = draws = 0
@@ -281,7 +290,7 @@ def main():
                         total[s][k] += v
                 wins += game["A"]["goals"] > game["B"]["goals"]
                 draws += game["A"]["goals"] == game["B"]["goals"]
-    res = {"a": args.a, "b": args.b, "det_a": args.det_a, "games": args.games, "wins": wins, "draws": draws,
+    res = {"a": args.a, "b": args.b, "det_a": args.det_a, "det_b": args.det_b, "stale": args.stale, "games": args.games, "wins": wins, "draws": draws,
            "goals": [total["A"]["goals"], total["B"]["goals"]], "A": summarize(total["A"]), "B": summarize(total["B"])}
     n_starts = len({e[0] for e in kick_eps})
     res["episodes"] = {"total": len(kick_eps), "debuts_distincts": n_starts, "issues_distinctes": len(set(kick_eps))}
