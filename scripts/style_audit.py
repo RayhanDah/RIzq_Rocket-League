@@ -3,9 +3,11 @@
     python scripts/style_audit.py --a runs/s10_ppo_kaggle/best_actor.pt --b runs/s10_ppo_kaggle/best_actor.pt --det-a
     python scripts/style_audit.py --a <nouvel agent> --b runs/s10_ppo_kaggle/best_actor.pt --det-a --games 40
     python scripts/style_audit.py --a <agent> --b necto --det-a --games 40       # Necto (NectoFamily), argmax
+    python scripts/style_audit.py --a <agent> --b nexto --det-a --games 40       # Nexto (Necto v2), argmax
 
-`necto` / `necto:<beta>` : le vrai Necto via l'adaptateur `rlagent/opponents/necto.py` (fidélité mesurée par
-`scripts/necto_check.py`, rappelée dans le rapport). Jamais dans le pool d'entraînement.
+`necto` / `necto:<beta>` : le vrai Necto via l'adaptateur `rlagent/opponents/necto.py` ; `nexto` / `nexto:<beta>` :
+Nexto via `rlagent/opponents/nexto.py` (kickoffs à beta 0,5 comme le bot). Fidélité mesurée par
+`scripts/necto_check.py [--bot nexto]`, rappelée dans le rapport. Jamais dans le pool d'entraînement.
 
 Toujours le même adversaire pour comparer deux agents. Trois blocs :
   - rush : vitesse, pression, contacts : ce qu'il ne faut pas perdre ;
@@ -72,10 +74,10 @@ def setup(config: str) -> None:
 def actor(spec: str):
     from evaluate import load_actor
 
-    from rlagent.opponents.necto import NectoOpponent, is_necto_spec
+    from rlagent.opponents.nexto import bot_from_spec, is_bot_spec
     if spec not in _actors:
         seed = int(time.time_ns() % 2**31)
-        _actors[spec] = NectoOpponent.from_spec(spec, seed=seed) if is_necto_spec(spec) else load_actor(spec)
+        _actors[spec] = bot_from_spec(spec, seed=seed) if is_bot_spec(spec) else load_actor(spec)
     return _actors[spec]
 
 
@@ -289,7 +291,7 @@ def main():
     ap.add_argument("--a", required=True)
     ap.add_argument("--b", required=True)
     ap.add_argument("--det-a", action="store_true",
-                    help="A en argmax (comme le bot) ; B reste échantillonné (sauf necto : argmax, necto:<beta> sinon)")
+                    help="A en argmax (comme le bot) ; B reste échantillonné (sauf necto/nexto : argmax, <bot>:<beta> sinon)")
     ap.add_argument("--det-b", action="store_true", help="B aussi en argmax (deux bots comme dans le vrai jeu)")
     ap.add_argument("--stale", type=float, default=0.0,
                     help="probabilité par step et par voiture de rejouer l'action précédente (bruit du vrai jeu)")
@@ -322,10 +324,11 @@ def main():
     print(f"remises au centre : {len(kick_eps)}, débuts distincts {n_starts}, (début, buteur, durée) distincts "
           f"{len(set(kick_eps))}" + ("  <- deux politiques déterministes : peu de parties vraiment différentes"
                                      if len(set(kick_eps)) < len(kick_eps) / 4 else ""))
-    from rlagent.opponents.necto import fidelity_report, is_necto_spec
-    if is_necto_spec(args.a) or is_necto_spec(args.b):
-        res["necto_fidelite"] = fidelity_report()
-        print("--- Necto (adaptateur RocketSim)\n" + res["necto_fidelite"]["texte"])
+    from rlagent.opponents.nexto import bot_fidelity, is_bot_spec
+    for spec in dict.fromkeys(s for s in (args.a, args.b) if is_bot_spec(s)):
+        name = spec.split(":", 1)[0]
+        res[f"{name}_fidelite"] = bot_fidelity(spec)
+        print(f"--- {name.capitalize()} (adaptateur RocketSim)\n" + res[f"{name}_fidelite"]["texte"])
     for block in ("rush", "finition", "kickoff", "aerien"):
         print(f"--- {block}" + " " * 22 + "A        B")
         for k in res["A"][block]:

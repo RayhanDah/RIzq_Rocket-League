@@ -1,13 +1,16 @@
-"""Fidélité de l'adaptateur Necto (`rlagent/opponents/necto.py`) au vrai bot NectoFamily.
+"""Fidélité des adaptateurs Necto / Nexto (`rlagent/opponents/necto.py`, `nexto.py`) aux vrais bots NectoFamily.
 
     .venv\\Scripts\\python scripts/necto_check.py dump --steps 1500             # parties A vs Necto, états + obs adaptateur
     .venv-bot\\Scripts\\python scripts/necto_check.py compare                   # code du clone sur paquets RLBot équivalents
+    .venv\\Scripts\\python scripts/necto_check.py dump --bot nexto              # idem pour Nexto (kickoffs en argmax)
+    .venv-bot\\Scripts\\python scripts/necto_check.py compare --bot nexto
 
 `dump` (venv d'entraînement) joue A contre Necto en RocketSim (Necto bleu puis orange) et enregistre à chaque step
 l'état brut, l'observation et l'action de l'adaptateur. `compare` (venv du bot : rlbot + rlgym_compat) refait des
 `GamePacket` RLBot avec ces états, les passe à `V1GameState` puis au `NectoObsBuilder` et à l'`Agent` du clone
 (importés depuis dist/opponents/NectoFamily/necto), et mesure l'écart d'observation par groupe de variables et
-l'accord des actions argmax. Résumé : dist/opponents/necto_check.json, relu par style_audit.py dans son rapport.
+l'accord des actions argmax. Résumé : dist/opponents/<bot>_check.json, relu par style_audit.py dans son rapport.
+Pour Nexto, `dump` coupe les kickoffs stochastiques (beta 0,5) pour comparer des argmax.
 
 Ce que la comparaison ne voit pas (pas de jeu ici) : la physique du vrai jeu, le retard RLBot, et l'`air_state` du
 paquet. Pour `on_ground`, `dump` estime à part combien de steps le jeu aurait dit autre chose que RocketSim
@@ -23,8 +26,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DUMP = ROOT / "dist" / "opponents" / "necto_check.npz"
-SUMMARY = ROOT / "dist" / "opponents" / "necto_check.json"
+OUT_DIR = ROOT / "dist" / "opponents"
 GROUPS = {"drapeaux": slice(0, 5), "position": slice(5, 8), "vitesse": slice(8, 11), "avant": slice(11, 14),
           "haut": slice(14, 17), "vit_angulaire": slice(17, 20), "boost": slice(20, 21), "minuteur": slice(21, 22),
           "au_sol": slice(22, 23), "flip_dispo": slice(23, 24)}
@@ -37,10 +39,11 @@ def dump(args) -> None:
     import torch
 
     from rlagent.opponents.necto import NectoOpponent, pad_locations_of
+    from rlagent.opponents.nexto import NextoOpponent
     sa.setup(args.config)
     env = sa._env
     ours = sa.actor(args.a)
-    necto = NectoOpponent(beta=1.0)
+    necto = NextoOpponent(beta=1.0, stochastic_kickoffs=False) if args.bot == "nexto" else NectoOpponent(beta=1.0)
     rec = {k: [] for k in ("ball", "cars", "pads", "me", "prev", "q", "kv", "act", "game", "ground_gap")}
     for game, necto_team in enumerate((0, 1)):
         necto.new_game(pad_locations_of(env))
@@ -93,12 +96,15 @@ def dump(args) -> None:
 
 
 def compare(args) -> None:
-    necto_dir = ROOT / "dist" / "opponents" / "NectoFamily" / "necto"
-    sys.path.insert(0, str(necto_dir))
+    sys.path.insert(0, str(ROOT / "dist" / "opponents" / "NectoFamily" / args.bot))
     from agent import Agent
-    from necto_obs import NectoObsBuilder
     from rlbot import flat
-    from rlgym_compat import V1GameState
+    if args.bot == "nexto":
+        from nexto_obs import NextoObsBuilder
+        from rlgym_compat.v1_game_state import V1GameState
+    else:
+        from necto_obs import NectoObsBuilder
+        from rlgym_compat import V1GameState
     with np.load(args.dump) as z:
         d = {k: z[k] for k in z.files}          # NpzFile relit et décompresse tout à chaque accès
     pads = d["pad_locations"]
@@ -141,9 +147,13 @@ def compare(args) -> None:
             print(f"{i}/{n}", flush=True)
         if d["game"][i] != cur_game:                  # nouvelle partie : bot relancé (minuteurs à zéro)
             cur_game = d["game"][i]
-            NectoObsBuilder.demo_timers = __import__("collections").Counter()
-            builder = NectoObsBuilder(field)
-            gs = V1GameState(field, tick_skip=8)
+            if args.bot == "nexto":                   # bot.py : NextoObsBuilder(field_info=...), GameState(field)
+                builder = NextoObsBuilder(field_info=field)
+                gs = V1GameState(field)
+            else:
+                NectoObsBuilder.demo_timers = __import__("collections").Counter()
+                builder = NectoObsBuilder(field)
+                gs = V1GameState(field, tick_skip=8)
         frame = 1000 + 8 * i
         gs.update(packet(i, frame))
         me = int(d["me"][i])
@@ -171,21 +181,29 @@ def compare(args) -> None:
            "actions_identiques_meme_obs_%": float(100 * np.mean(agree_same_obs)),
            "on_ground_jeu_different_%": float(100 * d["ground_gap"].mean())}
     print(json.dumps(res, indent=1))
-    SUMMARY.write_text(json.dumps(res, indent=1), encoding="utf-8")
-    print(f"-> {SUMMARY}")
+    summary = OUT_DIR / f"{args.bot}_check.json"
+    summary.write_text(json.dumps(res, indent=1), encoding="utf-8")
+    print(f"-> {summary}")
 
 
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("dump")
-    p.add_argument("--a", default=str(ROOT / "runs/s10_ppo_kaggle/pool/actor_0013535043833.pt"))
+    p.add_argument("--a", default=str(ROOT / "runs/s10_ppo_kaggle/best_actor.pt"))
     p.add_argument("--steps", type=int, default=1500, help="steps par couleur de Necto")
     p.add_argument("--config", default=str(ROOT / "runs/s10_ppo_kaggle/config.yaml"))
-    p.add_argument("--out", default=str(DEFAULT_DUMP))
+    p.add_argument("--bot", choices=("necto", "nexto"), default="necto")
+    p.add_argument("--out", default=None, help="défaut : dist/opponents/<bot>_check.npz")
     p = sub.add_parser("compare")
-    p.add_argument("--dump", default=str(DEFAULT_DUMP))
+    p.add_argument("--bot", choices=("necto", "nexto"), default="necto")
+    p.add_argument("--dump", default=None, help="défaut : dist/opponents/<bot>_check.npz")
     args = ap.parse_args()
+    default = str(OUT_DIR / f"{args.bot}_check.npz")
+    if args.cmd == "dump":
+        args.out = args.out or default
+    else:
+        args.dump = args.dump or default
     dump(args) if args.cmd == "dump" else compare(args)
 
 

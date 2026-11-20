@@ -150,19 +150,22 @@ class NectoOpponent:
     """Pilote une ou plusieurs voitures Necto. `new_game()` à chaque partie, `act()` à chaque step (8 ticks) :
     renvoie 8 lignes de commandes (une par tick), le kickoff codé en dur en a des différentes."""
 
+    name = "necto"
+    _load_model = staticmethod(lambda: load_model())
+
     def __init__(self, beta: float = 1.0, hardcoded_kickoffs: bool = True, seed: int | None = None):
         self.beta = float(beta)
         self.hardcoded_kickoffs = hardcoded_kickoffs
         self.rng = np.random.default_rng(seed)
-        self.model = load_model()
-        self.obs: NectoObs | None = None
+        self.model = self._load_model()
+        self.obs = None
         self.prev: dict[str, np.ndarray] = {}
         self.kickoff_index: dict[str, int] = {}
 
-    @staticmethod
-    def from_spec(spec: str, seed: int | None = None) -> NectoOpponent:
-        """`necto` (argmax, comme le bot) ou `necto:<beta>` (1 argmax, 0,5 échantillonné, 0 aléatoire)."""
-        return NectoOpponent(beta=float(spec.split(":", 1)[1]) if ":" in spec else 1.0, seed=seed)
+    @classmethod
+    def from_spec(cls, spec: str, seed: int | None = None) -> NectoOpponent:
+        """`necto` (argmax, comme le bot) ou `necto:<beta>` (1 argmax, 0,5 échantillonné, 0 aléatoire) ; idem nexto."""
+        return cls(beta=float(spec.split(":", 1)[1]) if ":" in spec else 1.0, seed=seed)
 
     def new_game(self, pad_locations: np.ndarray) -> None:
         self.obs = NectoObs(pad_locations)
@@ -172,6 +175,10 @@ class NectoOpponent:
     def on_reset(self, state: GameState) -> None:
         """Remise au centre : le bot relance son kickoff codé en dur (1v1 : il est toujours le preneur)."""
         self.kickoff_index = {}
+
+    def step_beta(self, state: GameState) -> float:
+        """Beta de ce step (Necto : toujours celui du bot)."""
+        return self.beta
 
     def _kickoff_rows(self, agent: str, state: GameState) -> np.ndarray | None:
         if not self.hardcoded_kickoffs:
@@ -206,21 +213,22 @@ class NectoOpponent:
     def build_obs(self, agent: str, state: GameState):
         return self.obs.build(agent, state, self.prev.get(agent, np.zeros(8)))
 
-    def policy(self, q, kv, mask) -> np.ndarray:
+    def policy(self, q, kv, mask, beta: float | None = None) -> np.ndarray:
         import torch
         with torch.no_grad():
             out, _ = self.model(tuple(torch.as_tensor(x, dtype=torch.float32) for x in (q, kv, mask)))
-        return parse_logits(out, self.beta, self.rng)
+        return parse_logits(out, self.beta if beta is None else beta, self.rng)
 
     def act(self, agents: list[str], state: GameState) -> dict[str, np.ndarray]:
         """-> {agent: commandes (8 ticks, 8)}. L'observation est construite à chaque step même pendant le kickoff
         (le bot le fait aussi : les minuteurs avancent pareil)."""
         out = {}
+        beta = self.step_beta(state)
         for agent in agents:
             q, kv, mask = self.build_obs(agent, state)
             rows = self._kickoff_rows(agent, state)
             if rows is None:
-                rows = np.repeat(self.policy(q, kv, mask)[None], TICK_SKIP, axis=0)
+                rows = np.repeat(self.policy(q, kv, mask, beta)[None], TICK_SKIP, axis=0)
             self.prev[agent] = rows[-1].astype(np.float64)
             out[agent] = rows
         return out
@@ -270,15 +278,21 @@ KNOWN_GAPS = ("écarts non mesurables sans le jeu : Necto agit ici sans le retar
               "RLBot non vérifiés")
 
 
-def fidelity_report() -> dict:
+def check_summary_path(name: str = "necto") -> Path:
+    return CHECK_SUMMARY.with_name(f"{name}_check.json")
+
+
+def fidelity_report(name: str = "necto", known_gaps: str = KNOWN_GAPS) -> dict:
     """Résumé de la dernière vérification `scripts/necto_check.py` (adaptateur vs code du clone), pour les rapports."""
-    if not CHECK_SUMMARY.exists():
-        return {"texte": "adaptateur NON vérifié : lancer scripts/necto_check.py dump puis compare\n" + KNOWN_GAPS}
-    r = json.loads(CHECK_SUMMARY.read_text(encoding="utf-8"))
+    path = check_summary_path(name)
+    if not path.exists():
+        return {"texte": f"adaptateur NON vérifié : lancer scripts/necto_check.py dump --bot {name} puis compare "
+                         f"--bot {name}\n" + known_gaps}
+    r = json.loads(path.read_text(encoding="utf-8"))
     worst = max(r["groupes"].items(), key=lambda kv: kv[1]["steps_ecart_%"])
     txt = (f"vs code du clone sur {r['steps']} états : obs identique {r['obs_identique_%']:.1f} % des steps "
            f"(pire groupe {worst[0]} : {worst[1]['steps_ecart_%']:.1f} %, écart max {worst[1]['max']:.3g}), "
            f"action argmax identique {r['actions_identiques_%']:.1f} %\n"
            f"on_ground du vrai jeu différent de RocketSim sur {r['on_ground_jeu_different_%']:.1f} % des steps "
-           f"(estimation, air_state)\n" + KNOWN_GAPS)
+           f"(estimation, air_state)\n" + known_gaps)
     return {**r, "texte": txt}
