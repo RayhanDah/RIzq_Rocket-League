@@ -61,8 +61,10 @@ class EpisodeTracker:
         self.stall_term = KickoffStallTerm(margin_s=rc.get("kickoff_stall_margin_s", 0.1),
                                            ramp_s=rc.get("kickoff_stall_ramp_s", 1.0),
                                            loser=rc.get("kickoff_stall_loser", 0.125))
-        self.demo_goal_term = DemoGoalTerm(window_s=rc.get("demo_goal_window_s", 5.0),
-                                           last_defender_only=rc.get("demo_goal_last_defender", True))
+        self.demo_goal_term = DemoGoalTerm(window_s=rc.get("demo_goal_window_s", 3.0),
+                                           last_defender_only=rc.get("demo_goal_last_defender", True),
+                                           own_half_only=rc.get("demo_goal_own_half", True),
+                                           full_s=rc.get("demo_goal_full_s", 0.75))
         self.high_goal_term = HighGoalTerm(min_z=rc.get("high_goal_min_z", 600.0))
         self.reset(None, {})
 

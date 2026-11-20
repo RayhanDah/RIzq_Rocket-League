@@ -1007,21 +1007,36 @@ def _own_goal_dist(car) -> float:
 
 
 class DemoGoalTerm(RewardTerm):
-    """+1 à l'auteur d'une démo si son équipe marque dans les `window_s` secondes qui suivent (palier 16). Mécanique du
+    """Bonus à l'auteur d'une démo si son équipe marque juste après (palier 16) : 1 si le but arrive dans les `full_s`
+    secondes, puis décroissance linéaire jusqu'à 0 à `window_s` secondes (version du PO du 20/11, comme kickoff_stall).
+    Sur 4 998 buts d'auto-jeu de v23037 : la démo du gardien garde ~97 % du bonus d'une fenêtre fixe, une démo loin du
+    but ~38 %. Mécanique du
     haut niveau : garder la balle sur le capot, démolir le gardien, la balle entre. `last_defender_only` (choix du PO) :
     seulement si la victime était, juste avant la démo, la voiture de son équipe la plus proche de son propre but (en
-    1v1, c'est toujours le cas). Auteur désigné comme pour `demo`. Dans `zero_sum_terms` : l'équipe qui encaisse perd
-    autant. Au plus un paiement par but (l'épisode finit au but), et rien sans but : pas de boucle possible."""
+    1v1, c'est toujours le cas). `own_half_only` (PO, 20/11) : la victime doit aussi être dans son propre camp, sinon
+    c'est un attaquant démoli suivi d'une contre-attaque. Mesure du 20/11 (auto-jeu de v23037, 4 998 buts) : à 5 s sans
+    cette condition, 21 % des bonus payaient la démo d'un attaquant ; à 2,8 s avec, aucun, et 42 des 53 démos du gardien
+    (but en 0,6 s en médiane) restent payées. Auteur désigné comme pour `demo`. Dans `zero_sum_terms` : l'équipe qui
+    encaisse perd autant. Au plus un paiement par but (l'épisode finit au but), et rien sans but : pas de boucle."""
     name = "demo_goal"
 
-    def __init__(self, window_s: float = 5.0, last_defender_only: bool = True):
+    def __init__(self, window_s: float = 3.0, last_defender_only: bool = True, own_half_only: bool = True,
+                 full_s: float = 0.75):
         self.window = int(round(float(window_s) * cv.TICKS_PER_SECOND))
+        self.full = int(round(min(float(full_s), float(window_s)) * cv.TICKS_PER_SECOND))
         self.last_defender_only = bool(last_defender_only)
+        self.own_half_only = bool(own_half_only)
 
     def reset(self, agents, state, shared_info):
         self.demoed = {a: bool(state.cars[a].is_demoed) for a in agents}
         self.prev_dist = {a: _own_goal_dist(state.cars[a]) for a in agents}
+        self.prev_in_own_half = {a: self._in_own_half(state.cars[a]) for a in agents}
         self.demos: List[Tuple[int, str]] = []          # (tick, auteur) des démos qui comptent
+
+    @staticmethod
+    def _in_own_half(car) -> bool:
+        y = float(car.physics.position[1])
+        return y < 0.0 if car.team_num == cv.BLUE_TEAM else y > 0.0
 
     def _is_last_defender(self, victim: str, agents, state) -> bool:
         team = state.cars[victim].team_num
@@ -1039,17 +1054,21 @@ class DemoGoalTerm(RewardTerm):
                 authors = [a for a in opps if _contact_victim(state.cars[a]) == v]
                 if not authors and opps:
                     authors = [min(opps, key=lambda a: norm3(state.cars[a].physics.position - victim.physics.position))]
-                if authors and (not self.last_defender_only or self._is_last_defender(v, agents, state)):
+                if (authors and (not self.last_defender_only or self._is_last_defender(v, agents, state))
+                        and (not self.own_half_only or self.prev_in_own_half.get(v, False))):
                     self.demos.append((tick, authors[0]))
         for v in agents:
             self.demoed[v] = bool(state.cars[v].is_demoed)
             if not self.demoed[v]:
                 self.prev_dist[v] = _own_goal_dist(state.cars[v])
+                self.prev_in_own_half[v] = self._in_own_half(state.cars[v])
         if state.goal_scored:
-            recent = [a for t, a in self.demos
-                      if tick - t <= self.window and state.cars[a].team_num == state.scoring_team]
+            recent = [(tick - t, a) for t, a in self.demos
+                      if tick - t < self.window and state.cars[a].team_num == state.scoring_team]
             if recent:
-                out[recent[-1]] = 1.0
+                delay, author = recent[-1]                     # la démo la plus récente : le plus gros bonus
+                span = max(1, self.window - self.full)
+                out[author] = 1.0 if delay <= self.full else max(0.0, (self.window - delay) / span)
             self.demos = []
         return out
 
@@ -1242,8 +1261,9 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         # paliers 15-17 (20/11/2026)
         KickoffStallTerm(margin_s=rc.get("kickoff_stall_margin_s", 0.1), ramp_s=rc.get("kickoff_stall_ramp_s", 1.0),
                          loser=rc.get("kickoff_stall_loser", 0.125)),
-        DemoGoalTerm(window_s=rc.get("demo_goal_window_s", 5.0),
-                     last_defender_only=rc.get("demo_goal_last_defender", True)),
+        DemoGoalTerm(window_s=rc.get("demo_goal_window_s", 3.0),
+                     last_defender_only=rc.get("demo_goal_last_defender", True),
+                     own_half_only=rc.get("demo_goal_own_half", True), full_s=rc.get("demo_goal_full_s", 0.75)),
         HighGoalTerm(min_z=rc.get("high_goal_min_z", 600.0)),
     ]
     stages = (cfg.get("curriculum") or {}).get("stages") or []

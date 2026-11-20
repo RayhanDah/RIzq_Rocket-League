@@ -721,10 +721,21 @@ Les trois termes (`env/rewards.py`) :
   - −0,25 en plus pour la voiture adverse la plus proche à la 1re touche (elle a perdu la course), qu'elle retouche
     ou non : le 50/50 qui suit n'est pas puni.
   - Une fois par kickoff, jamais positif, hors zéro-somme.
-- **`demo_goal`** : +4 (20 % d'un but) à l'auteur d'une démo si son équipe marque dans les 5 s.
+- **`demo_goal`** (version du PO) : +4 (20 % d'un but) à l'auteur d'une démo si son équipe marque dans les 0,75 s,
+  puis de moins en moins jusqu'à 0 à 3 s.
   - Seulement si la victime était, juste avant la démo, la voiture de son équipe la plus proche de son propre but
-    (choix du PO ; toujours vrai en 1v1).
+    (toujours vrai en 1v1) ET dans son propre camp : démolir un attaquant puis marquer en contre ne paie pas.
   - En plus de `demo` (8) et du but (20). Zéro-somme.
+  - Mesure (auto-jeu de v23037, 1 956 min, 4 998 buts, 276 démos suivies d'un but de l'auteur dans les 8 s) :
+
+    | Victime | Cas | Délai médian | Bonus moyen payé |
+    |---|---|---|---|
+    | gardien (dans son camp, < 2 000 uu de son but) | 53 | 0,6 s | 3,9 |
+    | défenseur à 2 000-4 000 uu | 95 | 2,3 s | 2,7 |
+    | dans son camp, > 4 000 uu | 64 | 3,4 s | 1,45 |
+    | attaquant (dans notre camp) | 64 | 4,3 s | 0 |
+
+    Avec la 1re version (5 s, sans condition de camp), 21 % des bonus payaient une démo d'attaquant.
 - **`high_goal`** : +5 (25 % d'un but) au buteur si sa touche était la dernière avant le but, balle à 600 uu ou plus
   (au-dessus d'un double saut, sous la barre).
   - Rien sur un but contre son camp, une déviation adverse, ou une touche des deux équipes au même step. Zéro-somme.
@@ -747,8 +758,8 @@ Pourquoi pas de boucle (`tests/test_exploits.py`, `tests/test_paliers_15_17.py`)
   | `demo_goal` | 0-0,2 % |
   | `high_goal` | 0-0,2 % |
 
-- Fréquences de départ en auto-jeu : buts après une démo du dernier défenseur ~3-6 % des buts, buts hauts ~0,5 %. Le
-  palier 17 apprendra lentement.
+- Fréquences de départ en auto-jeu : buts payés par `demo_goal` ~2,4 % des buts, buts hauts ~0,5 %. Le palier 17
+  apprendra lentement.
 - Garde-fou :
   - les trois termes sont plafonnés à 3 % du signal, et reviennent à 0 (poids de la session 8) s'ils dérivent ;
   - rejoué avec cette configuration sur les sessions 7 et 8 (13,76 → 23,04 G, jalons tous les 250 M), il reste

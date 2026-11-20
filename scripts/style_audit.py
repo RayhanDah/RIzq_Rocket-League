@@ -103,8 +103,10 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
         return ball, cars
 
     from rlagent.env.rewards import DemoGoalTerm, HighGoalTerm
-    goal_terms = {"demo_goals": DemoGoalTerm(window_s=_rc.get("demo_goal_window_s", 5.0),
-                                           last_defender_only=_rc.get("demo_goal_last_defender", True)),
+    goal_terms = {"demo_goals": DemoGoalTerm(window_s=_rc.get("demo_goal_window_s", 3.0),
+                                           last_defender_only=_rc.get("demo_goal_last_defender", True),
+                                           own_half_only=_rc.get("demo_goal_own_half", True),
+                                           full_s=_rc.get("demo_goal_full_s", 0.75)),
                   "high_goals": HighGoalTerm(min_z=_rc.get("high_goal_min_z", 600.0))}
     obs = env.reset()
     for p in necto:

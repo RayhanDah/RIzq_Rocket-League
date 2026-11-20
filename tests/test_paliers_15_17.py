@@ -86,7 +86,7 @@ def test_bonuses_are_zero_sum_and_the_stall_hits_both(cfg):
     assert {"demo_goal", "high_goal"} <= set(rc["zero_sum_terms"])
     assert "kickoff_stall" not in rc["zero_sum_terms"]          # sinon les deux pénalités s'annuleraient
     assert (rc["kickoff_stall_margin_s"], rc["kickoff_stall_ramp_s"], rc["kickoff_stall_loser"]) == (0.1, 1.0, 0.125)
-    assert rc["demo_goal_window_s"] == 5.0
+    assert (rc["demo_goal_full_s"], rc["demo_goal_window_s"]) == (0.75, 3.0) and rc["demo_goal_own_half"] is True
     assert rc["demo_goal_last_defender"] is True
     assert 500.0 < rc["high_goal_min_z"] < 642.775               # au-dessus d'un double saut, sous la barre
 
@@ -268,30 +268,42 @@ def goal(s, team):
     s.ball.position = np.array([0.0, 5300.0 if team == 0 else -5300.0, 300.0], dtype=np.float32)
 
 
-def test_demo_goal_pays_the_author_when_his_team_scores_within_5_s():
+def demo_then_goal(delay_steps, **kw):
+    """Démo de l'orange par le bleu, puis but bleu `delay_steps` actions plus tard ; renvoie le bonus du bleu."""
     s = make_state(kickoff=True)
     no_touch(s)
     blue, orange = cars(s)
     agents = list(s.cars)
-    t = DemoGoalTerm(5.0, last_defender_only=True)
+    t = DemoGoalTerm(**kw)
     t.reset(agents, s, {})
     tick(s)
     demo(s, blue, orange)
     assert t.get(agents, s, {}) == {blue: 0.0, orange: 0.0}     # rien à la démo elle-même (c'est `demo`)
-    for _ in range(4 * 15):                                     # 4 s plus tard, le bleu marque
+    for _ in range(delay_steps - 1):
         tick(s)
         assert t.get(agents, s, {}) == {blue: 0.0, orange: 0.0}
+    tick(s)
     goal(s, 0)
-    assert t.get(agents, s, {}) == {blue: 1.0, orange: 0.0}
+    r = t.get(agents, s, {})
+    assert r[orange] == 0.0
+    return r[blue]
+
+
+def test_demo_goal_full_until_0_75_s_then_down_to_0_at_3_s():
+    """Version du PO : 4 (plein) si le but arrive dans les 0,75 s, puis linéaire jusqu'à 0 à 3 s."""
+    for steps, expected in ((1, 1.0), (11, 1.0), (12, 1.0 - (0.8 - 0.75) / 2.25), (28, (3.0 - 28 / 15) / 2.25),
+                            (40, (3.0 - 40 / 15) / 2.25), (45, 0.0), (60, 0.0)):
+        assert demo_then_goal(steps) == pytest.approx(expected, abs=1e-6), steps
+    assert demo_then_goal(28) == pytest.approx(0.5, abs=0.03)                     # ~1,9 s : moitié
 
 
 def test_demo_goal_nothing_after_the_window_or_for_the_other_team():
-    for wait_s, scorer in ((6.0, 0), (1.0, 1)):
+    for wait_s, scorer in ((3.0, 0), (1.0, 1)):
         s = make_state(kickoff=True)
         no_touch(s)
         blue, orange = cars(s)
         agents = list(s.cars)
-        t = DemoGoalTerm(5.0)
+        t = DemoGoalTerm()
         t.reset(agents, s, {})
         tick(s)
         demo(s, blue, orange)
@@ -316,7 +328,7 @@ def test_demo_goal_only_for_the_last_defender_in_2v2():
             c.demo_respawn_timer, c.bump_victim_id = 0.0, None
         s.goal_scored = False
         agents = list(s.cars)
-        t = DemoGoalTerm(5.0, last_defender_only=only)
+        t = DemoGoalTerm(last_defender_only=only)
         t.reset(agents, s, {})
         tick(s)
         demo(s, blues[0], victim)
@@ -326,10 +338,30 @@ def test_demo_goal_only_for_the_last_defender_in_2v2():
         assert t.get(agents, s, {})[blues[0]] == paid, (only, victim)
 
 
+def test_demo_goal_not_for_an_attacker_demolished_in_our_half():
+    """PO : démolir un attaquant puis marquer en contre ne paie pas (en 1v1, il est toujours le « dernier défenseur »)."""
+    for own_half_only, paid in ((True, 0.0), (False, (3.0 - 15 / 15) / 2.25)):
+        s = make_state(kickoff=True)
+        no_touch(s)
+        blue, orange = cars(s)
+        place(s.cars[orange], [0.0, -3000.0, 17.0])              # l'orange attaque, dans le camp bleu
+        agents = list(s.cars)
+        t = DemoGoalTerm(last_defender_only=True, own_half_only=own_half_only)
+        t.reset(agents, s, {})
+        tick(s)
+        demo(s, blue, orange)
+        t.get(agents, s, {})
+        for _ in range(15):                                      # contre-attaque éclair : but 1 s plus tard
+            tick(s)
+            t.get(agents, s, {})
+        goal(s, 0)
+        assert t.get(agents, s, {})[blue] == pytest.approx(paid), own_half_only
+
+
 def test_demo_goal_is_zero_sum_through_the_team_reward(cfg):
     cur = SkillCurriculum.from_cfg(cfg)
     rc = cfg["rewards"]
-    rf = TeamReward([DemoGoalTerm(5.0)], rc["weights"], zero_sum=rc["zero_sum"],
+    rf = TeamReward([DemoGoalTerm()], rc["weights"], zero_sum=rc["zero_sum"],
                     zero_sum_terms=rc["zero_sum_terms"], stage_weights=cur.stage_weights)
     s = make_state(kickoff=True)
     no_touch(s)

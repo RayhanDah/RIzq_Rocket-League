@@ -127,8 +127,11 @@ rewards:
   kickoff_stall_margin_s: 0.1
   kickoff_stall_ramp_s: 1.0
   kickoff_stall_loser: 0.125
-  demo_goal_window_s: 5.0          # but au plus 5 s après la démo
-  demo_goal_last_defender: true    # PO : seulement la démo du dernier défenseur (toujours vrai en 1v1)
+  # PO (20/11) demo_goal : plein (4) si le but arrive dans les 0,75 s après la démo, puis 0 à 3 s (comme kickoff_stall).
+  demo_goal_full_s: 0.75
+  demo_goal_window_s: 3.0
+  demo_goal_last_defender: true    # PO : seulement la démo du dernier défenseur (toujours vrai en 1v1)…
+  demo_goal_own_half: true         # … et dans son propre camp (en 1v1 : pas un attaquant démoli)
   high_goal_min_z: 600.0           # but sur une touche avec la balle à 600 uu ou plus (double saut : ~500)
   weights:
     goal: 10.0
@@ -285,8 +288,10 @@ curriculum:
       min_steps: 500_000_000
       advance: {goals_per_min: 2.0, ladder/gap/actor_0023037887394: -25}
     # Palier 16 : démolir le gardien, la balle sur le capot, et marquer (mécanique très utilisée à haut niveau). +4 (20 %
-    # d'un but) à l'auteur de la démo si son équipe marque dans les 5 s, seulement si la victime était le dernier
-    # défenseur ; en plus de demo (8) et du but (20). Zéro-somme.
+    # d'un but) à l'auteur de la démo si son équipe marque dans les 0,75 s, puis de moins en moins jusqu'à 0 à 3 s,
+    # seulement si la victime était le dernier défenseur et dans son camp ; en plus de demo (8) et du but (20).
+    # Zéro-somme. Mesure du 20/11 (auto-jeu, 4 998 buts) : 2,4 % des buts, aucune démo d'attaquant (à 5 s sans condition
+    # de camp, 21 % des bonus en étaient) ; la démo du gardien (but en 0,6 s en médiane) reçoit 3,9 en moyenne.
     - name: demo_but
       rewards: {demo_goal: 4.0}
       blend_steps: 200_000_000
