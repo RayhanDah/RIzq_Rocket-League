@@ -279,6 +279,22 @@ def summarize_episodes(episodes: List[Dict[str, Any]]) -> Dict[str, float]:
         vals = [e[key] for e in episodes if key in e]
         if vals:
             out[key] = float(np.mean(vals))
+    # paliers 15-17 (20/11) : événements rares, comptés sur l'ensemble des minutes jouées
+    n_goals = sum(e["goal_team"] is not None for e in episodes)
+    for key in ("demo_goal", "high_goal"):
+        if any(key in e for e in episodes):
+            n = sum(int(e.get(key) or 0) for e in episodes)
+            out[f"{key}s_per_min"] = n / max(total_min, 1e-6)
+            out[f"goals/{key}_share"] = n / max(n_goals, 1)
+    kick = [e for e in episodes if e.get("kickoff_stalled") is not None]
+    if kick:
+        out["kickoff/stall_rate"] = float(np.mean([bool(e["kickoff_stalled"]) for e in kick]))
+        touched = [e["kickoff_first_touch_s"] for e in kick if e.get("kickoff_first_touch_s") is not None]
+        if touched:
+            out["kickoff/first_touch_s"] = float(np.mean(touched))
+        pen = [e["kickoff_penalty"] for e in kick if e.get("kickoff_penalty") is not None]
+        if pen:
+            out["kickoff/penalty"] = float(np.mean(pen))     # part « lenteur » de kickoff_stall, 0-1
     fmt = Counter(e["team_size"] for e in episodes)
     for k in (1, 2, 3):
         out[f"format_share/{k}v{k}"] = fmt.get(k, 0) / len(episodes)

@@ -15,6 +15,7 @@ Options (désactivées par défaut, `selfplay.*`) :
   (le run source peut continuer, tourner ses checkpoints ou être absent de la machine). Un ancien agent au bloc
   « soi » plus court joue via `fit_obs` (models/attention.py). Pas d'Elo pour eux (échelle d'un autre run).
   `pool/actor_XXX.pt` désigne une version de CE run : sur Kaggle, le code n'est pas à côté de runs/.
+  `checkpoints/ckpt_XXX.pt` : un checkpoint de CE run, nommé `actor_XXX` comme une version du pool.
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Un
 
 ANCHOR_PREFIX = "anchor:"
 RUN_POOL = "pool"         # début de chemin d'une ancre tirée du pool de ce run
+RUN_CKPT = "checkpoints"  # … ou d'un checkpoint de ce run (20/11 : v23037, dernier checkpoint, absent du pool)
 PFSP_PRIOR = 2.0         # pseudo-épisodes à 0,5 : une version jamais jouée a p = 0,5 ; 1 victoire → 0,67, pas 1
 STATS_FILE = "pfsp_stats.json"
 
@@ -71,6 +73,8 @@ def _anchor_default_name(spec: str) -> str:
     p = Path(spec)
     if p.parts[:1] == (RUN_POOL,):
         name = p.stem
+    elif p.parts[:1] == (RUN_CKPT,) and p.stem.startswith("ckpt_"):
+        name = "actor_" + p.stem[len("ckpt_"):]        # même nom qu'une version du pool au même step
     elif p.suffix == ".pt" and p.parent.name in ("checkpoints", "pool"):
         name = p.parent.parent.name if p.parent.name == "checkpoints" else f"{p.parent.parent.name}_{p.stem}"
     else:
@@ -182,6 +186,8 @@ class OpponentPool:
                 src = Path(spec)
                 if src.parts[:1] == (RUN_POOL,):               # version de CE run : même chemin partout
                     src = self.dir / src.relative_to(RUN_POOL)
+                elif src.parts[:1] == (RUN_CKPT,):             # checkpoint de CE run (pool/ est dans le run)
+                    src = self.dir.parent / src
                 elif not src.is_absolute() and root is not None:
                     src = Path(root) / src
                 src_file = resolve_anchor_file(src)

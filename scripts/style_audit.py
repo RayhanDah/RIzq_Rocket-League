@@ -36,16 +36,18 @@ STRONG_DV = 556.0              # frappe (uu/s), seuil de strong_touch
 
 COUNTERS = ("goals", "touches", "strong_touches", "on_target", "off_target", "spoils", "on_target_balls", "saves",
             "aerial_touches", "true_aerials", "wall_aerials", "aerial_goals", "flip_resets", "bumps", "demos", "flips",
-            "pickups", "kickoffs", "kickoff_first_touch", "kickoff_won", "kickoff_goals", "own_goals")
+            "pickups", "kickoffs", "kickoff_first_touch", "kickoff_won", "kickoff_goals", "own_goals",
+            "kickoff_stalls", "demo_goals", "high_goals")
 SUMS = ("speed", "boost", "supersonic", "air", "air_boost", "low_boost", "own_half", "ball_dist", "closer", "steps")
 
 _env = None
 _tick_s = 0.0
+_rc = {}                       # options de rewards du run (paliers 15-17 : mêmes définitions)
 _actors = {}
 
 
 def setup(config: str) -> None:
-    global _env, _tick_s
+    global _env, _tick_s, _rc
     if _env is not None:
         return
     import torch
@@ -61,6 +63,7 @@ def setup(config: str) -> None:
     cfg["env"]["no_touch_timeout_s"] = GAME_S
     cfg["env"]["adaptive_drills"] = False
     _tick_s = cfg["env"]["action_repeat"] / 120.0
+    _rc = dict(cfg["rewards"])
     _env = build_env(cfg, seed=int(time.time_ns() % 2**31))
     from rlagent.opponents.necto import MixedRepeatAction
     _env.action_parser = MixedRepeatAction(cfg["env"]["action_repeat"])    # indices : inchangé ; Necto : commandes
@@ -99,9 +102,15 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
                 for a, c in s.cars.items()}
         return ball, cars
 
+    from rlagent.env.rewards import DemoGoalTerm, HighGoalTerm
+    goal_terms = {"demo_goals": DemoGoalTerm(window_s=_rc.get("demo_goal_window_s", 5.0),
+                                           last_defender_only=_rc.get("demo_goal_last_defender", True)),
+                  "high_goals": HighGoalTerm(min_z=_rc.get("high_goal_min_z", 600.0))}
     obs = env.reset()
     for p in necto:
         p.on_reset(env.state)
+    for gt in goal_terms.values():
+        gt.reset(list(env.state.cars), env.state, {})
     prev_ball, prev = fresh()
     last_touch = None
     first_touch, kickoff_judged = None, False
@@ -131,6 +140,10 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
         obs, _, term, trunc = env.step(actions)
         t += _tick_s
         state = env.state
+        for key, gt in goal_terms.items():          # but après une démo du dernier défenseur, but sur touche haute
+            for ag, v in gt.get(list(state.cars), state, {}).items():
+                if v > 0.0:
+                    st[side_of[state.cars[ag].team_num]][key] += 1
         pos, vel = state.ball.position.tolist(), state.ball.linear_velocity.tolist()
         dv = float(np.linalg.norm(np.array(vel) - np.array(prev_ball[1])))
         dists = {a: float(np.linalg.norm(c.physics.position - state.ball.position)) for a, c in state.cars.items()}
@@ -195,6 +208,9 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
                 st[s_]["kickoffs"] += 1
             if first_touch is not None:             # premier contact dans les 3 s (ou avant le but)
                 st[first_touch]["kickoff_first_touch"] += 1
+            else:                                   # personne n'a touché la balle à 3 s (kickoff_stall)
+                for s_ in "AB":
+                    st[s_]["kickoff_stalls"] += 1
             if scored:
                 st[side_of[state.scoring_team]]["kickoff_won"] += 1
             elif abs(pos[1]) > 0.0:
@@ -212,6 +228,8 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
             obs = env.reset()
             for p in necto:
                 p.on_reset(env.state)
+            for gt in goal_terms.values():
+                gt.reset(list(env.state.cars), env.state, {})
             prev_ball, prev = fresh()
             last_touch = None
             ep_start, ep_steps = spawn(), 0
@@ -244,14 +262,17 @@ def summarize(d: dict) -> dict:
                      "precision_%": 100 * d["on_target"] / shots if shots else 0.0,
                      "deviations/min": per_min("spoils"),
                      "deviations_%_balles_cadrees": 100 * d["spoils"] / max(1, d["on_target_balls"]),
-                     "arrets/min": per_min("saves")},
+                     "arrets/min": per_min("saves"),
+                     "buts_apres_demo/min": per_min("demo_goals")},
         "kickoff": {"kickoffs": d["kickoffs"], "premier_contact_%": 100 * d["kickoff_first_touch"] / max(1, d["kickoffs"]),
                     "gagnes_a_3s_%": 100 * d["kickoff_won"] / max(1, d["kickoffs"]),
                     "buts_sur_kickoff_%": 100 * d["kickoff_goals"] / max(1, d["kickoffs"]),
+                    "sans_touche_a_3s_%": 100 * d["kickoff_stalls"] / max(1, d["kickoffs"]),
                     "csc/min": per_min("own_goals")},
         "aerien": {"touches_aeriennes/min": per_min("aerial_touches"), "vraies_aeriennes/min": per_min("true_aerials"),
                    "depuis_mur/min": per_min("wall_aerials"), "buts_aeriens/min": per_min("aerial_goals"),
                    "flip_resets/min": per_min("flip_resets"),
+                   "buts_hauts/min": per_min("high_goals"),
                    "temps_en_l_air_%": 100 * d["air"] / n, "boost_en_l_air_%": 100 * d["air_boost"] / max(1.0, d["air"]),
                    "boost_moyen": d["boost"] / n, "moins_de_10_boost_%": 100 * d["low_boost"] / n,
                    "ramassages/min": per_min("pickups")},

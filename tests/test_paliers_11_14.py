@@ -30,7 +30,7 @@ def changed(a, b):
 
 def test_stages_follow_aerien_one_change_each(cfg):
     names = [s["name"] for s in cfg["curriculum"]["stages"]]
-    assert names[names.index("aerien"):] == ["aerien"] + NEW
+    assert names[names.index("aerien"):names.index("petits_pads") + 1] == ["aerien"] + NEW   # puis 15-17 (20/11)
     w = weights(cfg)
     assert changed(w["aerien"], w["duel_aerien"]) == {"aerial_touch"}
     assert changed(w["duel_aerien"], w["arrets"]) == {"save"}
@@ -63,7 +63,8 @@ def test_aerien_hands_over_and_new_stages_are_slow_and_gated(cfg):
         if name != NEW[-1]:
             assert s["min_steps"] >= 500_000_000 and s["advance"]["goals_per_min"] >= 2.0
             assert s["advance"]["ladder/gap/actor_0018160005774"] >= -25
-    assert "advance" not in stage(cfg, NEW[-1])
+    # 20/11 : petits_pads n'est plus le dernier palier, il passe la main aux paliers 15-17 (test_paliers_15_17.py)
+    assert stage(cfg, NEW[-1])["advance"]["goals_per_min"] >= 2.0
 
 
 def test_session_8_continues_without_rollback_and_measures_against_v18160(cfg):

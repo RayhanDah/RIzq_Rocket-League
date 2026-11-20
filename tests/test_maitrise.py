@@ -333,4 +333,5 @@ def test_anchor_from_this_runs_pool_needs_no_path_to_the_code(tmp_path):
 def test_opponent_settings_for_the_session():
     sp = load_config(["kaggle_tpu", "s10"])["selfplay"]
     assert sp["pfsp"] and sp["anchors"][0] == "runs/s6_spo_kaggle" and len(sp["anchors"]) >= 5
-    assert all(a.startswith("pool/actor_") for a in sp["anchors"][1:])
+    # versions de CE run (pool/, ou checkpoints/ depuis le 20/11 pour v23037) : sur Kaggle le code n'est pas à côté de runs/
+    assert all(a.startswith(("pool/actor_", "checkpoints/ckpt_")) for a in sp["anchors"][1:])

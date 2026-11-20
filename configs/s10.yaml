@@ -20,6 +20,7 @@ train:
   # Session 8 (17/11) : on continue depuis la fin de la session 7 (18,54 G), sans retour en arrière. v18160 (meilleure au
   # classement) bat v18540 112-60, mais v18540 fait mieux contre Necto (86-7-7 contre 79-15-6) : écart trop faible pour
   # jeter 380 M steps et le critique qui va avec. v13600 reste dans guard.json (manual_rollbacks) : il ne rejouerait pas.
+  # Session 9 (20/11) : on continue depuis la fin de la session 8 (23,04 G = v23037, le bot actuel), sans retour.
   rollback_to: null
   rollback_critic_warmup_iters: 50
   # Jalons complets (acteur + critique + optimiseur) hors rotation, pour que le garde-fou ait où revenir.
@@ -37,9 +38,13 @@ train:
           max_rollbacks: 3, min_goals_ratio: 0.6,
           # 17/11 (paliers 11-14) : save et bump plafonnés à 5 % comme les autres termes renforcés, small_pad à 3 % ;
           # s'ils dérivent, retour au poids de la session 7 (aerial_touch 1, bump 1,3, save 0, small_pad 0).
+          # 20/11 (paliers 15-17) : kickoff_stall, demo_goal et high_goal plafonnés à 3 % (estimé : ~1,7 % pour
+          # kickoff_stall quand 92 % des kickoffs sont bloqués, ~0,1-0,2 % pour les deux bonus de but) ; s'ils dérivent,
+          # retour au poids de la session 8 (0).
           term_max_share: {kickoff_win: 0.05, kickoff_rush: 0.05, demo: 0.08, aerial_touch: 0.05, save: 0.05, bump: 0.05,
-                           small_pad: 0.03},
-          fallback_weights: {kickoff_win: 3.0, kickoff_rush: 0.05, demo: 5.3, aerial_touch: 1.0, bump: 1.3},
+                           small_pad: 0.03, kickoff_stall: 0.03, demo_goal: 0.03, high_goal: 0.03},
+          fallback_weights: {kickoff_win: 3.0, kickoff_rush: 0.05, demo: 5.3, aerial_touch: 1.0, bump: 1.3,
+                             kickoff_stall: 0.0, demo_goal: 0.0, high_goal: 0.0},
           reenable_terms: [aerial_touch]}
 env:
   # 1v1 uniquement : le match se joue en 1v1 (README) ; 2v2/3v3 plus tard. Les profils FUSIONNENT les dictionnaires :
@@ -94,7 +99,9 @@ rewards:
   zero_sum: 1.0
   # aerial_touch (14/11, palier 10) : zéro-somme, ce qu'un camp gagne en l'air l'autre le perd. Les deux dérives de la
   # session 5 étaient payées aux deux camps à la fois (~10 / min chacun) ; ici une boucle à deux ne rapporte rien.
-  zero_sum_terms: [goal, vel_ball_to_goal, demo, bump, aerial_touch, save]
+  # demo_goal, high_goal (20/11) : bonus de but, zéro-somme comme le but. kickoff_stall n'y est PAS : attendre coûte
+  # aux deux camps (en zéro-somme, les deux pénalités s'annuleraient).
+  zero_sum_terms: [goal, vel_ball_to_goal, demo, bump, aerial_touch, save, demo_goal, high_goal]
   team_spirit: {start: 0.0, end: 0.0, steps: 1}
   anneal: null                     # aucune décroissance programmée en steps : c'est le curriculum qui décide
   vel_player_to_ball_signed: true
@@ -115,6 +122,14 @@ rewards:
   flip_reset_max_per_flight: 3     # 1 + 0,5 + 0,25 : un triple reset est payé, pas un quatrième
   shot_off_target_factor: 0.25     # shot : frappe hors cadre dans le camp adverse payée au quart
   shot_threat_floor: 0.5           # shot_threat : moitié de la valeur dès que la balle est cadrée, le reste à l'approche
+  # 20/11 (PO) kickoff_stall : 0 jusqu'au temps d'un kickoff foncé + 0,1 s (2,17 / 2,43 / 2,70 s selon la distance),
+  # puis jusqu'à −1 en 1 s (× poids 2 = −2) ; −0,125 (× 2 = −0,25) en plus pour la voiture qui perd la course.
+  kickoff_stall_margin_s: 0.1
+  kickoff_stall_ramp_s: 1.0
+  kickoff_stall_loser: 0.125
+  demo_goal_window_s: 5.0          # but au plus 5 s après la démo
+  demo_goal_last_defender: true    # PO : seulement la démo du dernier défenseur (toujours vrai en 1v1)
+  high_goal_min_z: 600.0           # but sur une touche avec la balle à 600 uu ou plus (double saut : ~500)
   weights:
     goal: 10.0
     strong_touch: 4.0              # |Δv balle| : 0 sous 20 km/h, plein à 100 km/h
@@ -251,6 +266,38 @@ curriculum:
     - name: petits_pads
       rewards: {small_pad: 0.1}
       blend_steps: 200_000_000
+      # Session 9 : déjà 2,9 G steps à ce palier, il passe au palier 15 dès la reprise s'il tient face à v23037.
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0023037887394: -25}
+    # Paliers 15-17 (20/11, décision PO après les BO3 dans le vrai jeu : v23037 bat Necto 2-0, v22650 2-0, v18160 2-1).
+    # Même méthode que les paliers 8-14 : un changement par palier, 200 M steps de transition, 500 M au moins par palier,
+    # passage seulement sans régression (buts ≥ 2 / min, pas plus de 25 Elo sous v23037), plafond de 3 % du signal par
+    # nouveau terme. Aucune boucle : kickoff_stall est une pénalité versée une fois par kickoff ; demo_goal et high_goal
+    # ne paient qu'au but, une fois par but (tests/test_exploits.py, tests/test_paliers_15_17.py).
+    # Palier 15 : v22650 et v23037 ralentissent avant le kickoff pour arriver second, et quand les deux le font ils
+    # s'arrêtent. Mesure du 20/11 (RocketSim, 300 kickoffs en auto-jeu) : balle touchée avant 3 s dans 8 % des kickoffs
+    # pour v23037 (99 % pour v18160), 1re touche vers 4 s. Attendre ne coûtait rien : kickoff_win donne 0 aux deux
+    # quand la balle reste au centre. Version du PO : pénalité croissante selon l'heure de la 1re touche, de 0 (kickoff
+    # foncé + 0,1 s) à −2 une seconde plus tard (10 % d'un but), et −0,25 pour celui qui perd la course au ballon.
+    - name: kickoff_dispute
+      rewards: {kickoff_stall: 2.0}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0023037887394: -25}
+    # Palier 16 : démolir le gardien, la balle sur le capot, et marquer (mécanique très utilisée à haut niveau). +4 (20 %
+    # d'un but) à l'auteur de la démo si son équipe marque dans les 5 s, seulement si la victime était le dernier
+    # défenseur ; en plus de demo (8) et du but (20). Zéro-somme.
+    - name: demo_but
+      rewards: {demo_goal: 4.0}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0023037887394: -25}
+    # Palier 17 : marquer sur une aérienne haute ou un tir depuis le haut d'un mur. +5 (25 % d'un but) au buteur si sa
+    # touche était la dernière, balle à 600 uu ou plus (au-dessus d'un double saut, sous la barre). Zéro-somme : encaisser
+    # un but haut coûte autant, ce qui pousse aussi la défense aérienne. Environ 1 % des buts aujourd'hui (audits).
+    - name: but_haut
+      rewards: {high_goal: 5.0}
+      blend_steps: 200_000_000
 selfplay:
   hist_prob: 0.25
   pool_every_steps: 5_000_000
@@ -265,8 +312,10 @@ selfplay:
   # v13600 : point de départ de la session 7 ; v13720 : meilleure version de la session 6 au classement (156-15-29
   # contre v13535, mais 1-1-98 contre Necto en simulation). Les deux mesurent l'effet des paliers 8-10.
   # v18160 : meilleure version de la session 7 et bot actuel (2-2 contre Necto dans le vrai jeu) ; repère des paliers 11-14.
+  # v23037 : fin de la session 8 et bot actuel (BO3 du 19-20/11 : 2-0 contre Necto, 2-0 contre v22650, 2-1 contre
+  # v18160) ; repère des paliers 15-17. C'est le dernier checkpoint, pas une version du pool : nommé actor_0023037887394.
   anchors: [runs/s6_spo_kaggle, pool/actor_0005315235148.pt, pool/actor_0006800183709.pt, pool/actor_0007000329112.pt,
             pool/actor_0007565061406.pt, pool/actor_0008100114172.pt, pool/actor_0008400059217.pt,
             pool/actor_0013535043833.pt, pool/actor_0013600266923.pt, pool/actor_0013720292116.pt,
-            pool/actor_0018160005774.pt]
+            pool/actor_0018160005774.pt, checkpoints/ckpt_0023037887394.pt]
   anchor_prob: 0.5                 # 12,5 % des épisodes

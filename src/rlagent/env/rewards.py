@@ -933,6 +933,158 @@ class BumpTerm(RewardTerm):
         return out
 
 
+# --------------------------------------------------------------------------- paliers 15-17 (20/11/2026)
+# Temps de la 1re touche d'un kickoff foncé (Necto, qui fonce toujours, contre v23037 ; RocketSim, 200 kickoffs, 20/11)
+# selon la distance de la voiture la plus proche à la balle : diagonale, décalée, centre.
+KICKOFF_RUSH_DIST = (3279.0, 3849.0, 4609.0)
+KICKOFF_RUSH_S = (2.067, 2.333, 2.600)
+
+
+def kickoff_rush_time(dist: float) -> float:
+    """Temps attendu de la 1re touche quand on fonce, interpolé sur la distance (borné aux positions mesurées)."""
+    return float(np.interp(dist, KICKOFF_RUSH_DIST, KICKOFF_RUSH_S))
+
+
+class KickoffStallTerm(RewardTerm, _KickoffPhase):
+    """Kickoff bloqué ou lent (palier 15, version du PO du 20/11). Payé une fois par kickoff, jamais positif, hors
+    zéro-somme (attendre coûte aux deux camps) :
+    - toutes les voitures : 0 jusqu'à t0 = temps d'un kickoff foncé (`kickoff_rush_time`, selon la distance de la voiture
+      la plus proche) + `margin_s`, puis de 0 à −1 en `ramp_s` secondes, selon l'heure de la 1re touche (−1 si
+      personne n'a touché à t0 + ramp_s) ;
+    - en plus, `loser` pour la voiture adverse la plus proche de la balle à la 1re touche : elle a perdu la course, qu'elle
+      touche ensuite ou non (choix du PO : contester la balle juste après ne coûte rien de plus). Rien si les deux
+      équipes touchent au même step.
+    Mesure du 20/11 (RocketSim, 300 kickoffs) : en auto-jeu, v18160 touchait avant 3 s dans 99 % des kickoffs, v23037
+    dans 8 % (1re touche vers 4 s, les deux ralentissent pour arriver second)."""
+    name = "kickoff_stall"
+
+    def __init__(self, margin_s: float = 0.1, ramp_s: float = 1.0, loser: float = 0.125):
+        self.margin_s, self.ramp_s, self.loser = float(margin_s), max(1e-6, float(ramp_s)), float(loser)
+        self.t0 = self.t1 = 0.0
+        self.paid = 0.0                                   # part « heure de la 1re touche » versée, ∈ [0, 1] (métrique)
+
+    def reset(self, agents, state, shared_info):
+        self.reset_phase(state, shared_info)
+        self.done = not self.kickoff
+        self.paid = 0.0
+        if self.kickoff:
+            ball = state.ball.position
+            d = min(norm3(c.physics.position - ball) for c in state.cars.values())
+            self.t0 = kickoff_rush_time(d) + self.margin_s
+            self.t1 = self.t0 + self.ramp_s
+
+    def get(self, agents, state, shared_info):
+        out = {a: 0.0 for a in agents}
+        if self.done:
+            return out
+        t = self.elapsed(state)
+        touchers = [a for a, c in state.cars.items() if c.ball_touches > 0]
+        if touchers or state.goal_scored:
+            self.done = True
+            self.paid = min(max((t - self.t0) / self.ramp_s, 0.0), 1.0)
+            for a in agents:
+                out[a] = -self.paid
+            teams = {state.cars[a].team_num for a in touchers}
+            if len(teams) == 1:
+                first = teams.pop()
+                opps = [a for a in agents if state.cars[a].team_num != first]
+                if opps:
+                    loser = min(opps, key=lambda a: norm3(state.cars[a].physics.position - state.ball.position))
+                    out[loser] -= self.loser
+            return out
+        if t >= self.t1:
+            self.done = True
+            self.paid = 1.0
+            return {a: -1.0 for a in agents}
+        return out
+
+
+def _own_goal_dist(car) -> float:
+    """Distance de la voiture au fond de son propre but."""
+    own = _OWN_GOAL if car.team_num == cv.BLUE_TEAM else _OWN_GOAL_ORANGE
+    p = car.physics.position
+    return math.sqrt((p[0] - own[0]) ** 2 + (p[1] - own[1]) ** 2 + (p[2] - own[2]) ** 2)
+
+
+class DemoGoalTerm(RewardTerm):
+    """+1 à l'auteur d'une démo si son équipe marque dans les `window_s` secondes qui suivent (palier 16). Mécanique du
+    haut niveau : garder la balle sur le capot, démolir le gardien, la balle entre. `last_defender_only` (choix du PO) :
+    seulement si la victime était, juste avant la démo, la voiture de son équipe la plus proche de son propre but (en
+    1v1, c'est toujours le cas). Auteur désigné comme pour `demo`. Dans `zero_sum_terms` : l'équipe qui encaisse perd
+    autant. Au plus un paiement par but (l'épisode finit au but), et rien sans but : pas de boucle possible."""
+    name = "demo_goal"
+
+    def __init__(self, window_s: float = 5.0, last_defender_only: bool = True):
+        self.window = int(round(float(window_s) * cv.TICKS_PER_SECOND))
+        self.last_defender_only = bool(last_defender_only)
+
+    def reset(self, agents, state, shared_info):
+        self.demoed = {a: bool(state.cars[a].is_demoed) for a in agents}
+        self.prev_dist = {a: _own_goal_dist(state.cars[a]) for a in agents}
+        self.demos: List[Tuple[int, str]] = []          # (tick, auteur) des démos qui comptent
+
+    def _is_last_defender(self, victim: str, agents, state) -> bool:
+        team = state.cars[victim].team_num
+        mates = [a for a in agents if a != victim and state.cars[a].team_num == team and not self.demoed.get(a, False)]
+        return all(self.prev_dist[victim] <= self.prev_dist[a] for a in mates)
+
+    def get(self, agents, state, shared_info):
+        out = {a: 0.0 for a in agents}
+        tick = int(getattr(state, "tick_count", 0) or 0)
+        for v in agents:
+            victim = state.cars[v]
+            now = bool(victim.is_demoed)
+            if now and not self.demoed.get(v, now):
+                opps = [a for a in agents if state.cars[a].team_num != victim.team_num]
+                authors = [a for a in opps if _contact_victim(state.cars[a]) == v]
+                if not authors and opps:
+                    authors = [min(opps, key=lambda a: norm3(state.cars[a].physics.position - victim.physics.position))]
+                if authors and (not self.last_defender_only or self._is_last_defender(v, agents, state)):
+                    self.demos.append((tick, authors[0]))
+        for v in agents:
+            self.demoed[v] = bool(state.cars[v].is_demoed)
+            if not self.demoed[v]:
+                self.prev_dist[v] = _own_goal_dist(state.cars[v])
+        if state.goal_scored:
+            recent = [a for t, a in self.demos
+                      if tick - t <= self.window and state.cars[a].team_num == state.scoring_team]
+            if recent:
+                out[recent[-1]] = 1.0
+            self.demos = []
+        return out
+
+
+class HighGoalTerm(RewardTerm):
+    """+1 au buteur si la dernière touche avant le but était la sienne avec la balle à `min_z` uu ou plus (palier 17) :
+    aérienne haute, tir depuis le haut d'un mur ou du plafond. 600 uu : au-dessus de ce qu'atteint un double saut (balle
+    vers 500 uu), sous la barre (642 uu). Rien si la dernière touche est adverse (but contre son camp, déviation) ou si
+    les deux équipes ont touché au même step. Dans `zero_sum_terms` : encaisser un but haut coûte autant. Au plus un
+    paiement par but (l'épisode finit au but), et rien sans but : pas de boucle possible."""
+    name = "high_goal"
+
+    def __init__(self, min_z: float = 600.0):
+        self.min_z = float(min_z)
+
+    def reset(self, agents, state, shared_info):
+        self.last: Optional[Tuple[str, int, float]] = None   # (voiture, équipe, hauteur de la balle)
+
+    def get(self, agents, state, shared_info):
+        out = {a: 0.0 for a in agents}
+        touchers = [a for a in agents if state.cars[a].ball_touches > 0]
+        if touchers:
+            teams = {state.cars[a].team_num for a in touchers}
+            if len(teams) > 1:
+                self.last = None
+            else:
+                a = min(touchers, key=lambda x: norm3(state.cars[x].physics.position - state.ball.position))
+                self.last = (a, state.cars[a].team_num, float(state.ball.position[2]))
+        if state.goal_scored:
+            if self.last is not None and self.last[1] == state.scoring_team and self.last[2] >= self.min_z:
+                out[self.last[0]] = 1.0
+            self.last = None
+        return out
+
+
 def linear_schedule(start: float, end: float, steps: float, t: float) -> float:
     if steps <= 0:
         return end
@@ -1087,6 +1239,12 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         FlipResetTerm(cooldown_s=rc.get("flip_reset_cooldown_s", 1.0),
                       require_spent=rc.get("flip_reset_require_spent", False),
                       max_per_flight=rc.get("flip_reset_max_per_flight"), follow=rc.get("flip_reset_follow", 0.5)),
+        # paliers 15-17 (20/11/2026)
+        KickoffStallTerm(margin_s=rc.get("kickoff_stall_margin_s", 0.1), ramp_s=rc.get("kickoff_stall_ramp_s", 1.0),
+                         loser=rc.get("kickoff_stall_loser", 0.125)),
+        DemoGoalTerm(window_s=rc.get("demo_goal_window_s", 5.0),
+                     last_defender_only=rc.get("demo_goal_last_defender", True)),
+        HighGoalTerm(min_z=rc.get("high_goal_min_z", 600.0)),
     ]
     stages = (cfg.get("curriculum") or {}).get("stages") or []
     return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0),

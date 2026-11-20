@@ -10,6 +10,10 @@ pas avant) ; arrêt = touche après laquelle une trajectoire qui entrait dans NO
 Style (palier 5, mêmes définitions que scripts/style_audit.py) : déviation = touche qui fait sortir du cadre SA propre
 balle cadrée ; hors cadre = frappe qui atteint la ligne de but hors du cadre ; vraie aérienne = touche en l'air, balle
 au-dessus de 500 uu, après 0,25 s de boost depuis le décollage. Flip reset (palier 6) : env/common.is_flip_reset.
+Paliers 15-17 (20/11) : kickoff bloqué (personne n'a touché la balle à 3 s, comme l'audit), pénalité de kickoff lent
+versée (0-1, avant le poids), but après une démo du dernier défenseur,
+but sur une touche haute. Comptés par les termes de reward eux-mêmes (mêmes options que `rewards`), pour que la
+métrique mesure exactement ce qui est payé.
 """
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ from rlgym.rocket_league.api import GameState
 
 from ..env.common import is_flip_reset, norm3
 from ..env.predict import goal_line_time, goal_threat
-from ..env.rewards import DoubleCommitTerm
+from ..env.rewards import DemoGoalTerm, DoubleCommitTerm, HighGoalTerm, KickoffStallTerm
 
 KICKOFF_EVAL_S = 3.0
 
@@ -50,8 +54,16 @@ WALL_ZONE_X = cv.SIDE_WALL_X - 600.0
 
 
 class EpisodeTracker:
-    def __init__(self, double_commit_radius: float = 900.0, double_commit_min_speed: float = 400.0):
+    def __init__(self, double_commit_radius: float = 900.0, double_commit_min_speed: float = 400.0,
+                 rewards_cfg: Optional[Dict[str, Any]] = None):
         self.dc = DoubleCommitTerm(double_commit_radius, double_commit_min_speed)
+        rc = rewards_cfg or {}
+        self.stall_term = KickoffStallTerm(margin_s=rc.get("kickoff_stall_margin_s", 0.1),
+                                           ramp_s=rc.get("kickoff_stall_ramp_s", 1.0),
+                                           loser=rc.get("kickoff_stall_loser", 0.125))
+        self.demo_goal_term = DemoGoalTerm(window_s=rc.get("demo_goal_window_s", 5.0),
+                                           last_defender_only=rc.get("demo_goal_last_defender", True))
+        self.high_goal_term = HighGoalTerm(min_z=rc.get("high_goal_min_z", 600.0))
         self.reset(None, {})
 
     def reset(self, state: Optional[GameState], shared_info: Dict[str, Any]) -> None:
@@ -109,6 +121,15 @@ class EpisodeTracker:
         self.drill_team = shared_info.get("drill_team")
         self.drill_level = shared_info.get("drill_level") if self.drill is not None else None
         self.drill_result: Optional[float] = None
+        # paliers 15-17
+        self.kickoff_stalled: Optional[bool] = False if self.start_kind == "kickoff" else None
+        self.kickoff_first_touch_s: Optional[float] = None
+        self.demo_goal = 0
+        self.high_goal = 0
+        if state is not None:
+            agents = list(state.cars)
+            for t in (self.stall_term, self.demo_goal_term, self.high_goal_term):
+                t.reset(agents, state, shared_info)
 
     def step(self, state: GameState) -> None:
         self.steps += 1
@@ -162,6 +183,7 @@ class EpisodeTracker:
                     if victim is not None and victim in cars and cars[victim].team_num == team:
                         self.teammate_bumps += 1
             self.double_commit_steps += int(dc)
+        self._s15_17(state)
         if not self.kickoff_done:
             elapsed = (state.tick_count - self.start_tick) / cv.TICKS_PER_SECOND
             if state.goal_scored:
@@ -171,6 +193,18 @@ class EpisodeTracker:
                 y = float(state.ball.position[1])
                 self.kickoff_winner = 0 if y > 0 else 1  # balle dans le camp orange → avantage bleu
                 self.kickoff_done = True
+
+    def _s15_17(self, state: GameState) -> None:
+        agents = list(state.cars)
+        if self.start_kind == "kickoff" and self.kickoff_first_touch_s is None and (
+                any(c.ball_touches > 0 for c in state.cars.values())):
+            self.kickoff_first_touch_s = (state.tick_count - self.start_tick) / cv.TICKS_PER_SECOND
+        self.stall_term.get(agents, state, {})
+        if self.kickoff_stalled is False and self.kickoff_first_touch_s is None and (
+                (state.tick_count - self.start_tick) / cv.TICKS_PER_SECOND >= KICKOFF_EVAL_S):
+            self.kickoff_stalled = True
+        self.demo_goal += any(v > 0.0 for v in self.demo_goal_term.get(agents, state, {}).values())
+        self.high_goal += any(v > 0.0 for v in self.high_goal_term.get(agents, state, {}).values())
 
     def _shots_saves(self, teams, before, after) -> None:
         dv = [after[1][i] - before[1][i] for i in range(3)]
@@ -273,6 +307,11 @@ class EpisodeTracker:
             "wall_aerials_per_min": self.wall_aerials / minutes,
             "flip_resets_per_min": self.flip_resets / minutes,
             "kickoff_winner": self.kickoff_winner,
+            "kickoff_stalled": self.kickoff_stalled,
+            "kickoff_first_touch_s": self.kickoff_first_touch_s,
+            "kickoff_penalty": (self.stall_term.paid if self.kickoff_stalled is not None else None),
+            "demo_goal": self.demo_goal,
+            "high_goal": self.high_goal,
         }
         if self.car_steps > 0:
             car_minutes = max(1e-6, self.car_steps * (seconds / max(1, self.steps)) / 60.0)

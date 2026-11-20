@@ -61,7 +61,8 @@ class EnvRunner:
         else:
             from ..env.factory import build_env as factory
         self.env = factory(cfg, seed=seed)
-        self.tracker = EpisodeTracker(rc.get("double_commit_radius", 900), rc.get("double_commit_min_speed", 400))
+        self.tracker = EpisodeTracker(rc.get("double_commit_radius", 900), rc.get("double_commit_min_speed", 400),
+                                      rewards_cfg=rc)
         self.current = self.reset()
 
     def reset(self) -> EpisodeStart:

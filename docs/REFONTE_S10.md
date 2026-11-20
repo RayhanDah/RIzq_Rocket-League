@@ -666,3 +666,104 @@ Pourquoi pas de boucle (tests/test_exploits.py, test_paliers_11_14.py) :
   dans la trace.
 - Simulation contre Necto : vraies aériennes > 0,3 / min, part des buts ≥ 67 %.
 - Contre v18160 : > 55 % des buts.
+
+### Résultat de la session 8 (19-20/11/2026)
+Session 8 : 18,54 → 23,04 G steps (~165 k steps/s), aucun déclenchement du garde-fou, paliers 11 à 14 franchis.
+
+| Mesure | Résultat |
+|---|---|
+| Simulation : v22650 (meilleure au classement) contre Necto | 476-10-14, 75 % des buts, 0,40 vraie aérienne / min |
+| Simulation : v23037 (fin de session) contre Necto | 444-22-34, 68 % des buts |
+| Vrai jeu, BO3 contre Necto | v22650 0-2, v23037 2-0 |
+| Vrai jeu, BO3 v22650 contre v23037 | 0-2 |
+| Vrai jeu, finale v23037 contre v18160 | 2-1 |
+
+v23037 devient le bot (`bot/model.pt`). Le vrai jeu inverse la simulation contre Necto.
+Rapport : `runs/s10_ppo_kaggle/RAPPORT.md`.
+
+## 15. Session 9 : paliers 15-17 kickoffs disputés, démo puis but, buts hauts (20/11/2026)
+Constats du PO sur les matchs du 19-20/11 :
+- progrès en air dribble, gestion du boost, défense, attaque, tirs et duels ;
+- en défense aérienne, le bot saute maintenant sur les tirs hauts de Necto et les frôle ;
+- v22650 et v23037 ralentissent avant le kickoff pour arriver second. Quand les deux le font, ils s'arrêtent
+  parfois une seconde ;
+- le bot garde parfois la balle sur le capot et fonce dans le but pour démolir le gardien, une mécanique très
+  utilisée à haut niveau.
+
+Demandes du PO :
+- disputer les kickoffs ;
+- payer la démo du gardien suivie d'un but ;
+- payer les buts sur aérienne haute ou tir depuis le haut d'un mur ;
+- sans faille de reward, sans activer le garde-fou, et sans affaiblir le poids du but et de l'encaissement.
+
+Mesure des kickoffs (RocketSim, 300 kickoffs, `audits_2026-11-19/`) :
+
+| | Balle touchée avant 3 s | 1re touche (médiane) |
+|---|---|---|
+| v18160 contre lui-même | 99 % | 2,2-2,7 s |
+| v23037 contre lui-même (échantillonné, comme à l'entraînement) | 8 % | 3,9-4,1 s |
+| v23037 contre Necto (Necto fonce toujours) | 100 % | 2,07 s (diagonale), 2,33 s (décalée), 2,60 s (centre) |
+
+Attendre ne coûtait rien : quand la balle reste au centre à 3 s, `kickoff_win` donne 0 aux deux.
+
+| Palier | Changement | Transition | Passage |
+|---|---|---|---|
+| 14 petits_pads (reprise) | — | — | 500 M steps (déjà 2,9 G), buts ≥ 2 / min, au plus 25 Elo sous v23037 |
+| 15 kickoff_dispute | `kickoff_stall` 0 → 2 | 200 M | 500 M steps, mêmes critères |
+| 16 demo_but | `demo_goal` 0 → 4 (zéro-somme) | 200 M | 500 M steps, mêmes critères |
+| 17 but_haut | `high_goal` 0 → 5 (zéro-somme) | 200 M | dernier palier |
+
+Les trois termes (`env/rewards.py`) :
+- **`kickoff_stall`** (version du PO) : pénalité croissante selon l'heure de la 1re touche, pour les deux voitures.
+  - 0 jusqu'au temps d'un kickoff foncé + 0,1 s : 2,17 / 2,43 / 2,70 s, interpolé sur la distance de la voiture la
+    plus proche à la balle.
+  - Puis de 0 à −2 en 1 s, ou −2 si personne n'a touché la balle.
+  - −0,25 en plus pour la voiture adverse la plus proche à la 1re touche (elle a perdu la course), qu'elle retouche
+    ou non : le 50/50 qui suit n'est pas puni.
+  - Une fois par kickoff, jamais positif, hors zéro-somme.
+- **`demo_goal`** : +4 (20 % d'un but) à l'auteur d'une démo si son équipe marque dans les 5 s.
+  - Seulement si la victime était, juste avant la démo, la voiture de son équipe la plus proche de son propre but
+    (choix du PO ; toujours vrai en 1v1).
+  - En plus de `demo` (8) et du but (20). Zéro-somme.
+- **`high_goal`** : +5 (25 % d'un but) au buteur si sa touche était la dernière avant le but, balle à 600 uu ou plus
+  (au-dessus d'un double saut, sous la barre).
+  - Rien sur un but contre son camp, une déviation adverse, ou une touche des deux équipes au même step. Zéro-somme.
+
+Hors paliers : v23037 devient une ancre. C'est le dernier checkpoint, pas une version du pool : `pool.py` accepte
+désormais `checkpoints/ckpt_X.pt` (copie figée nommée `actor_X`). On continue depuis 23,04 G, sans retour en arrière.
+
+Pourquoi pas de boucle (`tests/test_exploits.py`, `tests/test_paliers_15_17.py`) :
+- `kickoff_stall` est une pénalité seule, versée une fois par kickoff : rien à farmer.
+- `demo_goal` et `high_goal` ne paient qu'au but, une fois par but (l'épisode finit au but).
+  - Une minute de démos sans but ne rapporte rien, ni une minute de touches hautes sans but.
+- Le but reste dominant : chaque bonus vaut au plus un quart de but, et rien d'autre ne change.
+- Part du signal mesurée sur 5 × 60 000 steps de RocketSim avec v23037 et les poids du palier 17 :
+
+  | Terme | Part du signal |
+  |---|---|
+  | but | 26-30 % |
+  | encaissement | 2,6-3,1 % |
+  | `kickoff_stall` | 0,5-0,9 % (92 % des kickoffs encore bloqués) |
+  | `demo_goal` | 0-0,2 % |
+  | `high_goal` | 0-0,2 % |
+
+- Fréquences de départ en auto-jeu : buts après une démo du dernier défenseur ~3-6 % des buts, buts hauts ~0,5 %. Le
+  palier 17 apprendra lentement.
+- Garde-fou :
+  - les trois termes sont plafonnés à 3 % du signal, et reviennent à 0 (poids de la session 8) s'ils dérivent ;
+  - rejoué avec cette configuration sur les sessions 7 et 8 (13,76 → 23,04 G, jalons tous les 250 M), il reste
+    silencieux ; sur la session 4, il se déclenche toujours avant 9 G.
+
+Nouvelles métriques :
+- `kickoff/stall_rate` : aucune touche à 3 s ;
+- `kickoff/penalty` : part « lenteur » versée, de 0 à 1 ;
+- `kickoff/first_touch_s` ;
+- `demo_goals_per_min`, `high_goals_per_min`, `goals/demo_goal_share`, `goals/high_goal_share`.
+
+Dans `style_audit.py` : `sans_touche_a_3s_%`, `buts_apres_demo/min`, `buts_hauts/min`.
+
+### Critères pour la session 9
+- Kickoffs en auto-jeu : `kickoff/stall_rate` < 20 % (93 % au départ).
+- Simulation contre Necto : part des buts ≥ 68 %, buts sur kickoff de Necto < 5 %.
+- Vrai jeu, BO3 contre v23037 et contre Necto : gagnés.
+- Buts après démo et buts hauts en hausse par rapport aux mesures de départ (`audits_2026-11-19/`).
