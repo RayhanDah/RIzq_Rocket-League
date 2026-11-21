@@ -3,8 +3,8 @@
 [settings]
 agent_id = "ensisa/rlagent/v22650_trace"
 name = "v22650"
-run_command = "..\\.venv-bot\\Scripts\\python.exe bot.py ..\\runs\\s10_ppo_kaggle\\actor_0022650369229.pt ..\\runs\\s10_ppo_kaggle\\real_2026-11-19\\trace_v22650_necto.jsonl"
-run_command_linux = "../.venv-bot/bin/python bot.py ../runs/s10_ppo_kaggle/actor_0022650369229.pt ../runs/s10_ppo_kaggle/real_2026-11-19/trace_v22650_necto.jsonl"
+run_command = "..\\.venv-bot\\Scripts\\python.exe bot.py ..\\runs\\s10_ppo_kaggle_s8\\actor_0022650369229.pt ..\\runs\\s10_ppo_kaggle_s8\\real_2026-11-19\\trace_v22650_necto.jsonl"
+run_command_linux = "../.venv-bot/bin/python bot.py ../runs/s10_ppo_kaggle_s8/actor_0022650369229.pt ../runs/s10_ppo_kaggle_s8/real_2026-11-19/trace_v22650_necto.jsonl"
 hivemind = false
 
 [details]
