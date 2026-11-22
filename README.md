@@ -128,12 +128,13 @@ Les collision meshes ne sont pas fournis : chacun les extrait de son propre jeu 
 ├── configs/          default.yaml, profils machine (laptop, kaggle…) et profils de run (s2 → s10)
 ├── scripts/          benchmarks, évaluation, audits de style, visualisation, export du bot, préparation cloud
 ├── cloud/            notebooks Kaggle / Colab et synchronisation
-├── bot/              bot RLBot v5 et configurations de matchs
+├── bot/              bot RLBot v5, poids de v25785 (model.pt) et configurations de matchs
 ├── tests/
 └── docs/             architecture, sprint 1, notes de conception des runs
 ```
 
-Non versionnés : `collision_meshes/`, `runs/` (checkpoints, pool, métriques) et `bot/model.pt`.
+Le bot fourni (`bot/model.pt`) est la version v25785. Non versionnés : `collision_meshes/` et `runs/` (checkpoints,
+pool, métriques).
 
 ---
 
