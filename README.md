@@ -3,12 +3,6 @@
 Rizq est un agent qui joue à Rocket League. Il a appris **de zéro**, sans démonstration humaine, en jouant contre
 lui-même dans **RocketSim** (la physique de Rocket League, sans graphismes et bien plus rapide que le temps réel) via
 **RLGym v2**. Il joue ensuite dans le vrai jeu grâce à **RLBot v5**.
-
-Projet d'apprentissage par renforcement de l'ENSISA. Le projet sera jugé en match 1v1 contre l'agent d'une autre
-équipe.
-
-> Le bot ne joue **jamais en ligne ni en ranked**. Il tourne uniquement hors ligne, dans les matchs créés par RLBot.
-
 ---
 
 ## Résultats
@@ -173,9 +167,3 @@ Le détail de chaque session est dans [`docs/REFONTE_S10.md`](docs/REFONTE_S10.m
 
 - [RLGym](https://rlgym.org) et [RocketSim](https://github.com/ZealanL/RocketSim) pour l'environnement et la simulation ;
 - [RLBot](https://rlbot.org) pour l'accès au vrai jeu ;
-- les auteurs de Necto et Nexto, qui servent de référence pour mesurer le niveau du bot.
-
-## Règle d'éthique
-
-Le bot ne joue **jamais en ligne / en ranked**. Des bots RL ont déjà été détournés pour tricher en ligne, et Psyonix
-bannit ces comptes.
