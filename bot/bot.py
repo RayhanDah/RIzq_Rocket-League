@@ -1,7 +1,7 @@
 """Bot RLBot v5 (S1-19) : fait jouer notre acteur dans le VRAI jeu via le wrapper rlgym-rlbot.
 
 Réutilise EXACTEMENT les mêmes AttentionObs et action parser qu'à l'entraînement (ARCHITECTURE §12).
-Le modèle est lu dans bot/model.pt, produit par :  python scripts/export_bot.py --run runs/<run>
+Le modèle est lu dans bot/model.pt
 ou dans le fichier passé en argument (relatif à bot/), pour faire jouer une autre version : voir agent_v*.toml.
 
 ⚠️ Hors ligne uniquement (RLBot). Jamais en ranked.
@@ -21,10 +21,14 @@ sys.path.insert(0, str(HERE.parent / "src"))
 
 from rlgym_rlbot import RLGymBot, RLGymBotConfig  # noqa: E402
 
-from rlagent.env.actions import make_action_parser  # noqa: E402
+from rlagent.env.actions import N_ACTIONS, make_action_parser  # noqa: E402
 from rlagent.env.obs import BALL_PRED_DIM, RACE_DIM, SELF_DIM, AttentionObs  # noqa: E402
 from rlagent.env.shadow_sim import ShadowSim, init_rocketsim, patch_compat_cars  # noqa: E402
-from rlagent.train import build_actor_from_model_cfg  # noqa: E402
+from rlagent.models.attention import actor_from_model_cfg  # noqa: E402
+
+
+def build_actor_from_model_cfg(model_cfg):
+    return actor_from_model_cfg(model_cfg, N_ACTIONS)
 
 
 class Agent:
