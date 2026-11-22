@@ -40,6 +40,8 @@ WORK = ROOT / "dist" / "kaggle"                    # dist/ n'est pas versionné
 STATE = WORK / "state.json"                        # runs lancés avec --init (pour le réattacher si besoin)
 MESHES_DATASET = "rl-collision-meshes"
 INIT_DATASET = "rl-agent-init"
+OPP_DATASET = "rl-agent-opponents"                 # modèle de Nexto (sparring et imitation, session 10)
+NEXTO_MODEL = ROOT / "dist" / "opponents" / "NectoFamily" / "nexto" / "nexto-model.pt"
 # machine_shape de Kaggle (kernel-metadata.json) : « GPU T4 x2 » et « TPU v5e-8 »
 ACCELERATORS = {"gpu": "NvidiaTeslaT4", "tpu": "TpuV5E8", "none": None}
 MAX_EMBEDDED = 900_000                             # octets de base64 : au-delà, le notebook devient trop lourd
@@ -247,6 +249,12 @@ def cmd_launch(args) -> None:
     if args.fresh and not args.init:
         state.pop(args.run_name, None)
     sources = [meshes]
+    opp = f"{username(k)}/{OPP_DATASET}"
+    if k and not dataset_exists(k, opp):
+        if not NEXTO_MODEL.exists():
+            sys.exit(f"{NEXTO_MODEL} absent (clone NectoFamily) : impossible de déposer le dataset {opp}")
+        upload_dataset(k, OPP_DATASET, "rl agent opponents", [NEXTO_MODEL], "modèle de Nexto (NectoFamily)")
+    sources.append(opp)
     if args.init or (args.anchors_from and (status is None or args.fresh or args.dry_run)):
         # --init : démarrage à chaud ; --anchors-from seul (1re session d'un run de zéro) : ancres seules
         from make_cloud_bundle import build_init_zip

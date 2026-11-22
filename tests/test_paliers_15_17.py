@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 V23037 = "checkpoints/ckpt_0023037887394.pt"
 GAP = "ladder/gap/actor_0023037887394"
 NEW = ["kickoff_dispute", "demo_but", "but_haut"]
+NEXT = ["bump_but", "murs", "double_saut"]          # paliers 18-20 (session 10, tests/test_paliers_18_20.py)
 TICK = 8                                          # une action = 8 ticks
 
 
@@ -61,7 +62,7 @@ def no_touch(s):
 # --------------------------------------------------------------------------- configuration
 def test_stages_follow_petits_pads_one_change_each(cfg):
     names = [s["name"] for s in cfg["curriculum"]["stages"]]
-    assert names[names.index("petits_pads"):] == ["petits_pads"] + NEW
+    assert names[names.index("petits_pads"):] == ["petits_pads"] + NEW + NEXT
     w = weights(cfg)
     assert changed(w["petits_pads"], w["kickoff_dispute"]) == {"kickoff_stall"}
     assert changed(w["kickoff_dispute"], w["demo_but"]) == {"demo_goal"}
@@ -86,7 +87,8 @@ def test_bonuses_are_zero_sum_and_the_stall_hits_both(cfg):
     assert {"demo_goal", "high_goal"} <= set(rc["zero_sum_terms"])
     assert "kickoff_stall" not in rc["zero_sum_terms"]          # sinon les deux pénalités s'annuleraient
     assert (rc["kickoff_stall_margin_s"], rc["kickoff_stall_ramp_s"], rc["kickoff_stall_loser"]) == (0.1, 1.0, 0.125)
-    assert (rc["demo_goal_full_s"], rc["demo_goal_window_s"]) == (0.75, 3.0) and rc["demo_goal_own_half"] is True
+    # 22/11 (PO, session 10) : fenêtre portée de 3 à 5 s
+    assert (rc["demo_goal_full_s"], rc["demo_goal_window_s"]) == (0.75, 5.0) and rc["demo_goal_own_half"] is True
     assert rc["demo_goal_last_defender"] is True
     assert 500.0 < rc["high_goal_min_z"] < 642.775               # au-dessus d'un double saut, sous la barre
 
@@ -97,10 +99,9 @@ def test_new_stages_are_slow_and_gated_against_v23037(cfg):
     for name in NEW:
         s = stage(cfg, name)
         assert s["blend_steps"] >= 200_000_000
-        if name != NEW[-1]:
-            assert s["min_steps"] >= 500_000_000
-            assert s["advance"] == {"goals_per_min": 2.0, GAP: -25}
-    assert "advance" not in stage(cfg, NEW[-1])
+        assert s["min_steps"] >= 500_000_000
+        # session 10 : but_haut n'est plus le dernier palier, il passe la main s'il tient face à v23037
+        assert s["advance"] == {"goals_per_min": 2.0, GAP: 0 if name == NEW[-1] else -25}
 
 
 def test_session_9_continues_from_v23037_and_measures_against_it(cfg):
@@ -112,7 +113,8 @@ def test_guard_caps_the_new_terms(cfg):
     g = cfg["train"]["guard"]
     for t in ("kickoff_stall", "demo_goal", "high_goal"):
         assert g["term_max_share"][t] == 0.03
-        assert g["fallback_weights"][t] == 0.0                   # poids de la session 8
+    assert g["fallback_weights"]["kickoff_stall"] == g["fallback_weights"]["high_goal"] == 0.0
+    assert g["fallback_weights"]["demo_goal"] == 4.0             # session 10 : retour au poids de la session 9
     assert g["enabled"] and g["max_rollbacks"] == 3 and g["min_goals_ratio"] == 0.6
 
 

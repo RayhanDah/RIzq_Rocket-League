@@ -778,3 +778,80 @@ Dans `style_audit.py` : `sans_touche_a_3s_%`, `buts_apres_demo/min`, `buts_hauts
 - Simulation contre Necto : part des buts ≥ 68 %, buts sur kickoff de Necto < 5 %.
 - Vrai jeu, BO3 contre v23037 et contre Necto : gagnés.
 - Buts après démo et buts hauts en hausse par rapport aux mesures de départ (`audits_2026-11-19/`).
+
+## 16. Session 10 : paliers 18-20, Nexto en sparring et imitation de Nexto (22/11/2026)
+Constats du PO après les BO3 du 21-22/11 (v25785 et v27450, vrai jeu) :
+- le bot ne bumpe jamais le gardien juste avant de marquer ;
+- il dispute un peu mieux les kickoffs, sans plus ;
+- il rate des buts que v23037 ne ratait pas, mais saute plus haut sur certaines balles ;
+- il reste plus lent en l'air que Necto et Nexto, qui doublent sauter ;
+- il ne défend pas leurs flicks ;
+- il prend beaucoup de buts aériens et s'engage sur des balles sans intérêt.
+
+Mesures en simulation, v25785 (audits du 21/11) :
+
+| | v25785 | Nexto |
+|---|---|---|
+| Vraies aériennes / min | 0,20 | 0,71 |
+| Aériennes depuis un mur / min | 0,08 | 0,13 |
+| Tirs cadrés / min | 1,5 | 2,9 |
+| Plus proche de la balle | 43 % | 57 % |
+
+`demo_goal` ne payait que les démolitions, jamais un simple bump.
+
+Décisions du PO :
+1. Paliers 18-20 ; fenêtre de `demo_goal` et `bump_goal` portée à 5 s (au lieu de 3 s).
+2. Nexto comme sparring-partner (pas Necto : il ne nous apprend plus rien en simulation).
+3. Imitation de Nexto au départ (kickstarting).
+
+| Palier | Changement | Transition | Passage |
+|---|---|---|---|
+| 17 but_haut (reprise, 3,4 G déjà) | — | — | 500 M, buts ≥ 2 / min, au moins à égalité avec v23037 |
+| 18 bump_but | `bump_goal` 0 → 3 (zéro-somme) | 200 M | 1 G steps (PO : plus de temps), mêmes critères |
+| 19 murs | `wall_touch` 0 → 0,5 (zéro-somme) | 200 M | 500 M, mêmes critères |
+| 20 double_saut | `fast_aerial` 0 → 1 (zéro-somme) | 200 M | dernier palier |
+
+Les nouveaux termes (`env/rewards.py`) :
+- **`bump_goal`** : comme `demo_goal`, pour un bump sans démolition.
+  - La victime doit être le dernier défenseur, dans son camp.
+  - Bonus plein si le but suit dans les 0,75 s, puis linéaire jusqu'à 0 à 5 s.
+  - Ne paie qu'au but, une fois par but.
+  - `demo_goal` reste à 4 : avec `high_goal` (5), les bonus cumulés restent sous un demi-but.
+- **`wall_touch`** : 1re touche d'un vol parti d'un mur, balle à 300 uu ou plus.
+- **`fast_aerial`** : 1re touche d'un vol avec double saut, balle à 500 uu ou plus.
+  - Plein dans les 0,8 s après le décollage, puis 0 à 2 s.
+- Pour ces deux termes de vol, la touche est payée 0,1 + 0,9 × g, où g est le gain de vitesse de la balle vers le but adverse rapporté à 1 000 uu/s.
+  - Une seule touche est payée par vol : il faut retoucher le sol ou un mur pour en payer une autre.
+  - Jongler au mur sans rien apporter rapporte moins d'un cinquième de but par minute (`tests/test_exploits.py`).
+- Plafond de 3 % du signal pour chaque nouveau terme ; s'il dérive, retour à 0. `drill_wall` passe de 5 % à 10 % des départs.
+- v25785 devient une ancre : `pool/actor_0025785348226.pt`, présent dans la sortie Kaggle de la session 9.
+
+**Nexto en sparring-partner** (`selfplay.nexto`) :
+- Nexto joue 10 % des épisodes, dans le worker, avec l'adaptateur `opponents/nexto.py`.
+  - Celui-ci est vérifié à 100 % contre le code du clone, kickoff codé en dur compris.
+  - Le collecteur marque ses voitures avec le code d'action −(1 + 100·beta).
+  - Les commandes passent par `MixedRepeatAction`, identique pour les indices.
+- Nexto joue d'abord échantillonné (beta 0,5, plus faible). Il passe en argmax quand notre score moyen atteint 0,3 sur ses 300 derniers épisodes.
+- Ses parties ne comptent ni pour l'Elo ni pour le classement (métriques `vs_nexto/*`).
+- Conséquence : en simulation, Nexto n'est plus un juge neutre. Les audits contre Nexto mesurent désormais aussi ce que le bot a appris contre lui.
+
+**Imitation de Nexto au départ** (`train.kickstart`, kickstarting) :
+- Nos 90 actions sont exactement celles de Nexto (même table).
+- Pour 25 % des voitures et des steps, le worker calcule l'action que Nexto choisirait : argmax de sa politique, sans son kickoff codé en dur.
+- Le learner ajoute coef × entropie croisée vers cette action.
+  - coef = 0,5 à la reprise (27,45 G), puis décroissance linéaire jusqu'à 0 en 1,5 G steps.
+  - Au-delà, plus rien n'est calculé.
+- Métriques : `learn/kick_coef`, `learn/kick_ce`, `learn/kick_agree` (accord argmax avec Nexto).
+- Coût mesuré : 0,6 ms par décision de Nexto (CPU, 1 thread).
+- Sur Kaggle, le modèle de Nexto vient du dataset privé `rl-agent-opponents` (`RLAGENT_NEXTO_MODEL`).
+- Licence de NectoFamily à vérifier : le clone n'a pas de fichier LICENSE.
+- Cette phase fait qu'une partie du niveau du bot vient de Nexto. À mentionner dans toute présentation des résultats.
+
+Tests : `tests/test_paliers_18_20.py`, nouvelles entrées de `tests/test_exploits.py`.
+
+### Critères pour la session 10
+- Contre Nexto (sim) : plus de 20 % des buts (v25785 : 19,9 %).
+- Contre Necto (sim) : au moins 75 % des buts.
+- Kickoff et aériennes : 1er contact contre Necto au-dessus de 10 % ; vraies aériennes contre Nexto au-dessus de 0,3 / min.
+- Buts après bump ou démo, touches depuis le mur : en hausse en auto-jeu.
+- Vrai jeu : BO3 gagnés contre v25785 et contre Necto.

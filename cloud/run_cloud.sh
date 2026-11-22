@@ -74,6 +74,9 @@ export RS_COLLISION_MESHES="$MESHES_DIR" PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf
 # allocateur GPU sans fragmentation (sinon la mémoire réservée grossit jusqu'à l'erreur « out of memory »)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 echo "[cloud] meshes : $MESHES_DIR ($(ls "$MESHES_DIR/soccar" | wc -l) fichiers)"
+# Session 10 : modèle de Nexto (sparring et imitation), déposé dans le dataset privé rl-agent-opponents
+NEXTO_MODEL=$(find /kaggle/input -maxdepth 6 -name nexto-model.pt 2>/dev/null | head -1 || true)
+if [ -n "$NEXTO_MODEL" ]; then export RLAGENT_NEXTO_MODEL="$NEXTO_MODEL"; echo "[cloud] Nexto : $NEXTO_MODEL"; fi
 
 # 3) Accélérateur utilisable ? (vrai calcul, pas seulement la détection). P100 : plus gérée par les PyTorch récents.
 DEVICE=$("$PY" - <<'PYEOF'

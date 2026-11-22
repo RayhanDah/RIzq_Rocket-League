@@ -16,7 +16,7 @@ from .collector import Trajectory
 from .gae import RunningStats, batch_gae, segment_discount
 from .losses import policy_loss, ratio_stats
 
-STAT_KEYS = ("policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac", "ratio_dev")
+STAT_KEYS = ("policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac", "ratio_dev", "kick_ce", "kick_agree")
 
 
 @torch.no_grad()
@@ -126,8 +126,13 @@ def build_batch(trajs: List[Trajectory], critic: nn.Module, ret_stats: RunningSt
     # sur tout le lot = la suite des fusions par trajectoire (même moyenne / variance).
     ret_stats.update(segment_discount(raw, lengths, gamma))
 
+    teacher = None
+    if any(t.teachers is not None for t in trajs):       # imitation de Nexto (train.kickstart) : −1 = pas d'étiquette
+        teacher = np.concatenate([np.full(len(t), -1, np.int64) if t.teachers is None
+                                  else np.asarray(t.teachers, dtype=np.int64) for t in trajs])
     return {
         "obs": obs,
+        "teacher": teacher,
         "actions": np.concatenate([np.asarray(t.actions, dtype=np.int64) for t in trajs]),
         "log_probs": np.concatenate([np.asarray(t.log_probs, dtype=np.float32) for t in trajs]),
         "advantages": adv,
@@ -194,6 +199,10 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optim
 
     behavior_kl = 0.0
     is_max = float(p.get("is_weight_max", 2.0))
+    # Imitation de Nexto (kickstarting) : + kick_coef × entropie croisée vers l'action de Nexto, sur les lignes étiquetées
+    kick_coef = float(p.get("kick_coef", 0.0))
+    teacher = batch.get("teacher")
+    use_kick = kick_coef > 0.0 and teacher is not None and bool((teacher >= 0).any())
     rows: Optional[DeviceRows] = None
     if resident_batch(p, device):
         # Lot résident (XLA) : copié une fois, complété à rows.cap lignes ; les lignes ajoutées ne sont jamais tirées
@@ -207,6 +216,7 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optim
         t_logp = rows.put(batch["log_probs"], torch.float32)
         t_adv = rows.put(adv, torch.float32)
         t_ret = rows.put(batch["returns"], torch.float32)
+        t_teach = rows.put(teacher, torch.long) if use_kick else None
         if decoupled:
             t_center = resident_log_probs(actor, t_obs, t_act, rows)                 # log π_prox
             log_w = t_center - t_logp
@@ -221,6 +231,7 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optim
         t_logp = torch.as_tensor(batch["log_probs"], dtype=torch.float32).to(src)
         t_adv = torch.as_tensor(adv, dtype=torch.float32).to(src)
         t_ret = torch.as_tensor(batch["returns"], dtype=torch.float32).to(src)
+        t_teach = torch.as_tensor(teacher, dtype=torch.long).to(src) if use_kick else None
         if decoupled:
             t_center = batched_log_probs(actor, t_obs, t_act, device, chunk)          # log π_prox
             log_w = t_center - t_logp
@@ -238,7 +249,7 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optim
             idx = idx.to(src)
             take = (lambda t: t[idx].to(device, non_blocking=True))
         return (take(t_obs), take(t_act), take(t_center), take(t_adv), take(t_ret),
-                None if t_w is None else take(t_w))
+                None if t_w is None else take(t_w), None if t_teach is None else take(t_teach))
 
     # Garde-fou (mode adaptive_kl) : si la politique s'est déjà trop éloignée de celle de collecte
     # (KL > kl_stop × target_kl, mesuré avant le pas), on n'applique pas ce pas et on arrête l'itération.
@@ -266,19 +277,28 @@ def ppo_update(actor: nn.Module, critic: nn.Module, optimizer: torch.optim.Optim
             for c in range(0, len(mb), chunk):
                 idx = mb[c:c + chunk]
                 w = len(idx) / len(mb)
-                o, act, old, a, ret, wi = fetch(idx)
+                o, act, old, a, ret, wi, tch = fetch(idx)
                 dist = actor.dist(o)
                 logp = dist.log_prob(act)
                 pl = policy_loss(logp, old, a, eps, kind, wi)
                 ent = dist.entropy().mean()
                 v = critic(o)
                 vl = torch.nn.functional.mse_loss(v, ret)
-                loss = (pl - float(p["ent_coef"]) * ent + float(p["vf_coef"]) * vl) * w
-                loss.backward()
+                loss = pl - float(p["ent_coef"]) * ent + float(p["vf_coef"]) * vl
+                zero = torch.zeros((), dtype=torch.float32, device=logp.device)
+                kce, kag = zero, zero
+                if tch is not None:
+                    m = (tch >= 0).float()
+                    cnt = m.sum().clamp(min=1.0)
+                    kce = -(dist.log_prob(tch.clamp(min=0)) * m).sum() / cnt
+                    kag = ((dist.probs.argmax(-1) == tch).float() * m).sum() / cnt
+                    loss = loss + kick_coef * kce
+                (loss * w).backward()
                 lp = logp.detach()
                 kl, cf = ratio_stats(lp, old, eps)
                 rd = (torch.exp(lp - old) - 1).abs().mean()
-                acc = acc + torch.stack([pl.detach(), vl.detach(), ent.detach(), kl, cf, rd]).float() * w
+                acc = acc + torch.stack([pl.detach(), vl.detach(), ent.detach(), kl, cf, rd,
+                                         kce.detach(), kag.detach()]).float() * w
             if check_kl:
                 accel.step_barrier(device)     # XLA : avant + arrière + stats en un seul graphe, avant de lire le KL
                 if float(acc[STAT_KEYS.index("approx_kl")]) > stop_kl:

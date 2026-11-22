@@ -16,6 +16,8 @@ Différences avec Necto, reprises du bot :
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from rlgym.rocket_league import common_values as cv
 from rlgym.rocket_league.api import GameState
@@ -159,7 +161,8 @@ def load_model():
     global _MODEL
     if _MODEL is None:
         import torch
-        path = NEXTO_DIR / "nexto-model.pt"
+        import os
+        path = Path(os.environ.get("RLAGENT_NEXTO_MODEL") or NEXTO_DIR / "nexto-model.pt")   # Kaggle : dataset
         if not path.exists():
             raise FileNotFoundError(f"Modèle Nexto absent : {path} (cloner NectoFamily dans dist/opponents)")
         import warnings

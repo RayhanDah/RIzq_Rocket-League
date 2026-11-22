@@ -10,6 +10,11 @@
 train:
   init_from: null                  # de zéro
   total_steps: 100_000_000_000     # default.yaml : 10 G, atteint en plein milieu de la session 4 (8,14 G au départ)
+  # Session 10 (22/11, décision PO) : imitation de Nexto au départ (kickstarting). Les workers donnent l'action que Nexto
+  # choisirait (argmax de sa politique, même table de 90 actions que nous) pour 25 % des voitures et des steps ; le
+  # learner ajoute coef × entropie croisée vers cette action, coef de 0,5 à la reprise (27,45 G) jusqu'à 0 en 1,5 G steps.
+  # Coût mesuré : 0,6 ms par étiquette (CPU, 1 thread), ~10-15 % de débit pendant la phase d'imitation.
+  kickstart: {enabled: true, begin: 27_450_134_560, steps: 1_500_000_000, coef: 0.5, frac: 0.25}
   # Session 5 (08/11) : la session 4 a dérivé à partir de 8,7 G (jonglage payé par aerial_touch). On repart de v8400,
   # la meilleure version mesurée ; les versions plus récentes quittent le pool (pool/rejected/). Une seule fois par run
   # et par version (guard.json, manual_rollbacks).
@@ -42,9 +47,11 @@ train:
           # kickoff_stall quand 92 % des kickoffs sont bloqués, ~0,1-0,2 % pour les deux bonus de but) ; s'ils dérivent,
           # retour au poids de la session 8 (0).
           term_max_share: {kickoff_win: 0.05, kickoff_rush: 0.05, demo: 0.08, aerial_touch: 0.05, save: 0.05, bump: 0.05,
-                           small_pad: 0.03, kickoff_stall: 0.03, demo_goal: 0.03, high_goal: 0.03},
+                           small_pad: 0.03, kickoff_stall: 0.03, demo_goal: 0.03, high_goal: 0.03, bump_goal: 0.03,
+                           wall_touch: 0.03, fast_aerial: 0.03},
           fallback_weights: {kickoff_win: 3.0, kickoff_rush: 0.05, demo: 5.3, aerial_touch: 1.0, bump: 1.3,
-                             kickoff_stall: 0.0, demo_goal: 0.0, high_goal: 0.0},
+                             kickoff_stall: 0.0, demo_goal: 4.0, high_goal: 0.0, bump_goal: 0.0, wall_touch: 0.0,
+                             fast_aerial: 0.0},
           reenable_terms: [aerial_touch]}
 env:
   # 1v1 uniquement : le match se joue en 1v1 (README) ; 2v2/3v3 plus tard. Les profils FUSIONNENT les dictionnaires :
@@ -56,8 +63,9 @@ env:
   # 3,7 %). `drill_reset` : roues face à la balle, pour que le reward `flip_reset` puisse se déclencher.
   # 08/11 : `drill_aerial` retiré (0 % de réussite sur toute la session 4, 3,7 % sur la 3), ses 5 % vont au jeu libre.
   # 17/11 (session 8, PO : il ne défend pas les tirs aériens de Necto) : drill_aerial_defense 5 → 10 %, pris au jeu libre.
-  start_weights: {kickoff: 0.3, random: 0.15, aerial: 0.05, attack_defense: 0.05, drill_air: 0.15, drill_reset: 0.05,
-                  drill_aerial: 0.0, drill_shot: 0.05, drill_wall: 0.05, drill_low_boost: 0.05, drill_aerial_defense: 0.10}
+  start_weights: {kickoff: 0.3, random: 0.10, aerial: 0.05, attack_defense: 0.05, drill_air: 0.15, drill_reset: 0.05,
+                  drill_aerial: 0.0, drill_shot: 0.05, drill_wall: 0.10, drill_low_boost: 0.05, drill_aerial_defense: 0.10}
+  # 22/11 (session 10, PO : plus à l'aise au mur) : drill_wall 5 → 10 %, pris au jeu libre (random 0,15 → 0,10).
   # Plancher 0,4 de l'aérien : balles à 580-890 uu, au-dessus du seuil des rewards aériens et hors de portée d'un simple
   # saut. Vol et reset partent de 0 (leur niveau mesure justement le recul par rapport au geste).
   drill_curriculum: {enabled: true, start: 0.4, min_level: 0.4, step: 0.005, promote: 0.6, demote: 0.3,
@@ -101,7 +109,8 @@ rewards:
   # session 5 étaient payées aux deux camps à la fois (~10 / min chacun) ; ici une boucle à deux ne rapporte rien.
   # demo_goal, high_goal (20/11) : bonus de but, zéro-somme comme le but. kickoff_stall n'y est PAS : attendre coûte
   # aux deux camps (en zéro-somme, les deux pénalités s'annuleraient).
-  zero_sum_terms: [goal, vel_ball_to_goal, demo, bump, aerial_touch, save, demo_goal, high_goal]
+  zero_sum_terms: [goal, vel_ball_to_goal, demo, bump, aerial_touch, save, demo_goal, high_goal, bump_goal, wall_touch,
+                   fast_aerial]
   team_spirit: {start: 0.0, end: 0.0, steps: 1}
   anneal: null                     # aucune décroissance programmée en steps : c'est le curriculum qui décide
   vel_player_to_ball_signed: true
@@ -127,12 +136,19 @@ rewards:
   kickoff_stall_margin_s: 0.1
   kickoff_stall_ramp_s: 1.0
   kickoff_stall_loser: 0.125
-  # PO (20/11) demo_goal : plein (4) si le but arrive dans les 0,75 s après la démo, puis 0 à 3 s (comme kickoff_stall).
+  # PO (20/11) demo_goal : plein si le but arrive dans les 0,75 s après la démo, puis décroissance linéaire.
+  # PO (22/11) : jusqu'à 0 à 5 s au lieu de 3 s (aussi pour bump_goal, palier 18).
   demo_goal_full_s: 0.75
-  demo_goal_window_s: 3.0
+  demo_goal_window_s: 5.0
   demo_goal_last_defender: true    # PO : seulement la démo du dernier défenseur (toujours vrai en 1v1)…
   demo_goal_own_half: true         # … et dans son propre camp (en 1v1 : pas un attaquant démoli)
   high_goal_min_z: 600.0           # but sur une touche avec la balle à 600 uu ou plus (double saut : ~500)
+  # 22/11 (paliers 19-20) : une seule touche payée par vol, selon ce qu'elle apporte (comme aerial_touch utile).
+  wall_touch_min_z: 300.0          # wall_touch : 1re touche d'un vol parti d'un mur, balle à 300 uu ou plus
+  fast_aerial_min_z: 500.0         # fast_aerial : 1re touche d'un vol avec double saut, balle à 500 uu ou plus…
+  fast_aerial_fast_s: 0.8          # … plein dans les 0,8 s après le décollage, 0 à 2 s
+  fast_aerial_slow_s: 2.0
+  flight_touch_floor: 0.1        # jongler au mur sans rien apporter : 0,05 par vol (tests/test_exploits.py)
   weights:
     goal: 10.0
     strong_touch: 4.0              # |Δv balle| : 0 sous 20 km/h, plein à 100 km/h
@@ -303,8 +319,37 @@ curriculum:
     - name: but_haut
       rewards: {high_goal: 5.0}
       blend_steps: 200_000_000
+      min_steps: 500_000_000
+      # Session 10 : déjà 3,4 G steps à ce palier ; passe au palier 18 dès la reprise s'il tient face à v23037.
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0023037887394: 0}
+    # Paliers 18-20 (22/11, PO après les BO3 : le bot ne bumpe jamais le gardien avant de marquer, n'est pas à l'aise au
+    # mur, va moins vite en l'air que Necto et Nexto, qui doublent sauter). Même méthode : un changement par palier,
+    # 200 M steps de transition, plafond de 3 % du signal, passage sans régression face à v23037.
+    # Palier 18 : bump (sans démo) du dernier défenseur dans son camp, puis but : +3 plein jusqu'à 0,75 s, 0 à 5 s ;
+    # la démo suivie d'un but reste à 4 (bonus cumulés sous un demi-but). Zéro-somme, ne paie qu'au but. 1 G steps au moins (PO : plus de temps).
+    - name: bump_but
+      rewards: {bump_goal: 3.0}
+      blend_steps: 200_000_000
+      min_steps: 1_000_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0023037887394: 0}
+    # Palier 19 : 1re touche d'un vol parti d'un mur, balle à 300 uu ou plus, payée selon l'apport vers le but adverse
+    # (0,25 à 1). Zéro-somme ; drill_wall passe à 10 % des départs pour toute la session.
+    - name: murs
+      rewards: {wall_touch: 0.5}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0023037887394: 0}
+    # Palier 20 : 1re touche d'un vol avec double saut, balle à 500 uu ou plus, pleine si elle arrive dans les 0,8 s
+    # après le décollage (0 à 2 s), selon l'apport vers le but adverse. Zéro-somme.
+    - name: double_saut
+      rewards: {fast_aerial: 1.0}
+      blend_steps: 200_000_000
 selfplay:
   hist_prob: 0.25
+  # Session 10 (22/11, décision PO) : Nexto en sparring pour 10 % des épisodes (pas Necto : plus d'adversité utile en
+  # simulation). Il joue d'abord échantillonné (beta 0,5, plus faible), puis en argmax quand notre score moyen contre
+  # lui atteint 0,3 sur ses 300 derniers épisodes. Ses parties ne comptent ni pour l'Elo ni pour le classement (vs_nexto/*).
+  nexto: {prob: 0.10, beta_start: 0.5, promote_score: 0.3, promote_window: 300}
   pool_every_steps: 5_000_000
   pool_recent: 20
   pfsp: true                       # (1 − p)² : les ancres déjà battues ne coûtent presque plus de parties
@@ -319,8 +364,10 @@ selfplay:
   # v18160 : meilleure version de la session 7 et bot actuel (2-2 contre Necto dans le vrai jeu) ; repère des paliers 11-14.
   # v23037 : fin de la session 8 et bot actuel (BO3 du 19-20/11 : 2-0 contre Necto, 2-0 contre v22650, 2-1 contre
   # v18160) ; repère des paliers 15-17. C'est le dernier checkpoint, pas une version du pool : nommé actor_0023037887394.
+  # v25785 : meilleure version de la session 9 et bot actuel (BO3 du 21/11 : 2-0 contre Necto et v27450, 1-2 contre
+  # v23037) ; repère des paliers 18-20.
   anchors: [runs/s6_spo_kaggle, pool/actor_0005315235148.pt, pool/actor_0006800183709.pt, pool/actor_0007000329112.pt,
             pool/actor_0007565061406.pt, pool/actor_0008100114172.pt, pool/actor_0008400059217.pt,
             pool/actor_0013535043833.pt, pool/actor_0013600266923.pt, pool/actor_0013720292116.pt,
-            pool/actor_0018160005774.pt, checkpoints/ckpt_0023037887394.pt]
+            pool/actor_0018160005774.pt, checkpoints/ckpt_0023037887394.pt, pool/actor_0025785348226.pt]
   anchor_prob: 0.5                 # 12,5 % des épisodes

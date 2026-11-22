@@ -1104,6 +1104,128 @@ class HighGoalTerm(RewardTerm):
         return out
 
 
+# --------------------------------------------------------------------------- paliers 18-20 (22/11/2026)
+class BumpGoalTerm(DemoGoalTerm):
+    """Comme `demo_goal`, pour un BUMP sans démolition (palier 18, PO du 22/11 : le bot ne bumpe jamais le gardien juste
+    avant de marquer). Événement : début d'un contact (`bump_victim_id`, comme `BumpTerm`) avec un adversaire qui n'est
+    pas démoli à ce step (la démo relève de `demo_goal`), dernier défenseur de son équipe et dans son camp. Bonus plein si
+    l'équipe de l'auteur marque dans les `full_s` secondes, puis linéaire jusqu'à 0 à `window_s`. Zéro-somme. Au plus un
+    paiement par but, rien sans but : pas de boucle."""
+    name = "bump_goal"
+
+    def reset(self, agents, state, shared_info):
+        super().reset(agents, state, shared_info)
+        self.prev_victim = {a: _contact_victim(state.cars[a]) for a in agents}
+
+    def get(self, agents, state, shared_info):
+        out = {a: 0.0 for a in agents}
+        tick = int(getattr(state, "tick_count", 0) or 0)
+        for a in agents:
+            car = state.cars[a]
+            v = _contact_victim(car)
+            new = v is not None and v != self.prev_victim.get(a) and v in state.cars
+            self.prev_victim[a] = v
+            if not new or state.cars[v].team_num == car.team_num or state.cars[v].is_demoed:
+                continue
+            if ((not self.last_defender_only or self._is_last_defender(v, agents, state))
+                    and (not self.own_half_only or self.prev_in_own_half.get(v, False))):
+                self.demos.append((tick, a))
+        for v in agents:
+            self.demoed[v] = bool(state.cars[v].is_demoed)
+            if not self.demoed[v]:
+                self.prev_dist[v] = _own_goal_dist(state.cars[v])
+                self.prev_in_own_half[v] = self._in_own_half(state.cars[v])
+        if state.goal_scored:
+            recent = [(tick - t, a) for t, a in self.demos
+                      if tick - t < self.window and state.cars[a].team_num == state.scoring_team]
+            if recent:
+                delay, author = recent[-1]
+                span = max(1, self.window - self.full)
+                out[author] = 1.0 if delay <= self.full else max(0.0, (self.window - delay) / span)
+            self.demos = []
+        return out
+
+
+class _FlightTerm(RewardTerm):
+    """Base des paliers 19-20 : suit chaque vol (décollage → retour au sol) et paie AU PLUS la 1re touche du vol, balle à
+    `min_z` ou plus, selon ce qu'elle apporte : `floor` + (1 − `floor`) × g, g = gain de vitesse de la balle vers le but
+    adverse / `useful_speed` (borné à [0, 1]), comme `aerial_touch` en mode utile. Une parade compte (arrêter une balle
+    qui file vers notre but lui ajoute de la vitesse vers le but adverse). Le jonglage ne paie rien : une seule touche
+    par vol, et il faut retoucher le sol (ou un mur) pour un nouveau vol."""
+
+    def __init__(self, min_z: float, useful_speed: float = 1000.0, floor: float = 0.25):
+        self.min_z, self.useful_speed, self.floor = float(min_z), float(useful_speed), float(floor)
+
+    def reset(self, agents, state, shared_info):
+        self.flight: Dict[str, Optional[Dict[str, Any]]] = {a: None for a in agents}
+        self.ground_up_z = {a: float(state.cars[a].physics.up[2]) for a in agents}
+        self.prev_ground = {a: bool(state.cars[a].on_ground) for a in agents}
+        self.prev_ball_vel = np.asarray(state.ball.linear_velocity, dtype=np.float32).copy()
+
+    def eligible(self, car, flight: Dict[str, Any], tick: int) -> float:
+        """Facteur du vol (0 = rien) ; à définir dans la classe fille."""
+        raise NotImplementedError
+
+    def get(self, agents, state, shared_info):
+        tick = int(getattr(state, "tick_count", 0) or 0)
+        vel = np.asarray(state.ball.linear_velocity, dtype=np.float32)
+        dv = (vel - self.prev_ball_vel).tolist()
+        self.prev_ball_vel = vel.copy()
+        ball = state.ball.position.tolist()
+        out = {}
+        for a in agents:
+            car = state.cars[a]
+            out[a] = 0.0
+            ground = bool(car.on_ground) and car.ball_touches <= 0     # roues sur la balle : le vol continue
+            if ground:
+                self.ground_up_z[a] = float(car.physics.up[2])
+                self.flight[a] = None
+            elif self.flight.get(a) is None:                           # décollage (ou départ en l'air d'un exercice)
+                self.flight[a] = {"t0": tick, "wall": self.prev_ground.get(a, False)
+                                  and self.ground_up_z.get(a, 1.0) < 0.6, "paid": False}
+            self.prev_ground[a] = ground
+            f = self.flight.get(a)
+            if f is None or f["paid"] or car.ball_touches <= 0 or float(ball[2]) < self.min_z:
+                continue
+            f["paid"] = True                                           # 1re touche haute du vol, payée ou non
+            factor = self.eligible(car, f, tick)
+            if factor <= 0.0:
+                continue
+            goal = _OPP_GOAL if car.team_num == cv.BLUE_TEAM else _OPP_GOAL_ORANGE
+            g = min(1.0, max(0.0, _dot_dir(dv, ball, goal) / self.useful_speed))
+            out[a] = factor * (self.floor + (1.0 - self.floor) * g)
+        return out
+
+
+class WallTouchTerm(_FlightTerm):
+    """Palier 19 (PO du 22/11 : plus à l'aise avec les murs et les sauts depuis le mur pour atteindre la balle plus vite).
+    1re touche d'un vol parti d'un mur (roues au contact, vecteur « haut » de la voiture à moins de 0,6 en z au dernier
+    instant au sol), balle à `min_z` ou plus. Zéro-somme, comme aerial_touch."""
+    name = "wall_touch"
+
+    def eligible(self, car, flight, tick):
+        return 1.0 if flight["wall"] else 0.0
+
+
+class FastAerialTerm(_FlightTerm):
+    """Palier 20 (PO du 22/11 : Necto et Nexto vont plus vite en l'air grâce aux doubles sauts). 1re touche d'un vol
+    avec double saut utilisé, balle à `min_z` (500) ou plus : plein si la touche arrive dans les `fast_s` secondes après
+    le décollage, puis linéaire jusqu'à 0 à `slow_s`. Zéro-somme."""
+    name = "fast_aerial"
+
+    def __init__(self, min_z: float = 500.0, useful_speed: float = 1000.0, floor: float = 0.25,
+                 fast_s: float = 0.8, slow_s: float = 2.0):
+        super().__init__(min_z, useful_speed, floor)
+        self.fast = float(fast_s) * cv.TICKS_PER_SECOND
+        self.slow = max(float(slow_s) * cv.TICKS_PER_SECOND, self.fast + 1.0)
+
+    def eligible(self, car, flight, tick):
+        if not car.has_double_jumped:
+            return 0.0
+        t = tick - flight["t0"]
+        return 1.0 if t <= self.fast else max(0.0, (self.slow - t) / (self.slow - self.fast))
+
+
 def linear_schedule(start: float, end: float, steps: float, t: float) -> float:
     if steps <= 0:
         return end
@@ -1265,6 +1387,15 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
                      last_defender_only=rc.get("demo_goal_last_defender", True),
                      own_half_only=rc.get("demo_goal_own_half", True), full_s=rc.get("demo_goal_full_s", 0.75)),
         HighGoalTerm(min_z=rc.get("high_goal_min_z", 600.0)),
+        # paliers 18-20 (22/11/2026)
+        BumpGoalTerm(window_s=rc.get("demo_goal_window_s", 3.0),
+                     last_defender_only=rc.get("demo_goal_last_defender", True),
+                     own_half_only=rc.get("demo_goal_own_half", True), full_s=rc.get("demo_goal_full_s", 0.75)),
+        WallTouchTerm(min_z=rc.get("wall_touch_min_z", 300.0), useful_speed=rc.get("aerial_useful_speed") or 1000.0,
+                      floor=rc.get("flight_touch_floor", 0.25)),
+        FastAerialTerm(min_z=rc.get("fast_aerial_min_z", 500.0), useful_speed=rc.get("aerial_useful_speed") or 1000.0,
+                       floor=rc.get("flight_touch_floor", 0.25), fast_s=rc.get("fast_aerial_fast_s", 0.8),
+                       slow_s=rc.get("fast_aerial_slow_s", 2.0)),
     ]
     stages = (cfg.get("curriculum") or {}).get("stages") or []
     return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0),

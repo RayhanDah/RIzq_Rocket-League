@@ -37,6 +37,18 @@ class EpisodeStart:
     agents: List[str]
     teams: np.ndarray        # (n,) 0 = bleu, 1 = orange
     obs: np.ndarray          # (n, OBS_DIM)
+    # (n,) action (indice de la table de 90, la même que Nexto) que Nexto choisirait dans cet état, −1 = non calculée
+    # (`train.kickstart` : imitation de Nexto au début de la session 10) ; None = pas d'imitation en cours
+    teacher: Optional[np.ndarray] = None
+
+
+# Action « jouée par Nexto » envoyée par le collecteur : −(1 + round(100 · beta)) ; le worker calcule les commandes.
+def nexto_action_code(beta: float) -> int:
+    return -(1 + int(round(100.0 * float(beta))))
+
+
+def nexto_beta_of(code: int) -> float:
+    return (-int(code) - 1) / 100.0
 
 
 @dataclass
@@ -63,22 +75,85 @@ class EnvRunner:
         self.env = factory(cfg, seed=seed)
         self.tracker = EpisodeTracker(rc.get("double_commit_radius", 900), rc.get("double_commit_min_speed", 400),
                                       rewards_cfg=rc)
+        # Session 10 : Nexto comme adversaire (selfplay.nexto) et comme professeur (train.kickstart). Les commandes de
+        # Nexto (kickoff codé en dur : 8 lignes par step) passent par MixedRepeatAction, identique pour les indices.
+        self.seed = seed
+        self.nexto_cfg = (cfg.get("selfplay") or {}).get("nexto") or {}
+        self.kick_cfg = (cfg.get("train") or {}).get("kickstart") or {}
+        if cfg["env"].get("engine", "rocketsim") == "fake":                # moteur factice des tests : pas d'arène
+            self.kick_cfg = {}
+        self.nexto = None                      # adversaire Nexto (créé au 1er besoin)
+        self.teacher_obs = None                # NextoObs du professeur (sans état : un seul par arène)
+        self.rng = np.random.default_rng(seed + 104729)
+        if float(self.nexto_cfg.get("prob", 0.0)) > 0.0 and cfg["env"].get("engine", "rocketsim") != "fake":
+            from ..opponents.necto import MixedRepeatAction
+            self.env.action_parser = MixedRepeatAction(int(cfg["env"]["action_repeat"]))
         self.current = self.reset()
+
+    def _pads(self):
+        from ..opponents.necto import pad_locations_of
+        return pad_locations_of(self.env)
+
+    def _kick_frac(self) -> float:
+        k = self.kick_cfg
+        if not k.get("enabled"):
+            return 0.0
+        step = float(self.env.shared_info.get("global_step", 0))
+        begin, steps = float(k.get("begin", 0)), float(k.get("steps", 0))
+        return float(k.get("frac", 0.25)) if begin <= step < begin + steps else 0.0
+
+    def _teacher(self, agents: List[str]) -> Optional[np.ndarray]:
+        """Action de Nexto (argmax de sa politique, sans le kickoff codé en dur) pour une part `frac` des voitures."""
+        frac = self._kick_frac()
+        if frac <= 0.0:
+            return None
+        from ..opponents.nexto import NextoObs, load_model
+        import torch
+        if self.teacher_obs is None:
+            self.teacher_obs = NextoObs(self._pads())
+        state = self.env.state
+        prev = self.env.shared_info.get("prev_actions", {})
+        out = np.full(len(agents), -1, dtype=np.int16)
+        model = load_model()
+        for i, a in enumerate(agents):
+            if self.rng.random() >= frac:
+                continue
+            q, kv, mask = self.teacher_obs.build(a, state, np.asarray(prev.get(a, np.zeros(8)), dtype=np.float64))
+            with torch.no_grad():
+                logits, _ = model(tuple(torch.as_tensor(x, dtype=torch.float32) for x in (q, kv, mask)))
+            out[i] = int(torch.argmax(logits.reshape(-1)))
+        return out
 
     def reset(self) -> EpisodeStart:
         env = self.env
         obs_dict = env.reset()
         agents = list(obs_dict.keys())
         self.tracker.reset(env.state, env.shared_info)
+        if self.nexto is not None:
+            self.nexto.on_reset(env.state)
         return EpisodeStart(
             agents=agents,
             teams=np.array([env.state.cars[a].team_num for a in agents], dtype=np.int8),
             obs=np.stack([obs_dict[a] for a in agents]).astype(np.float32),
+            teacher=self._teacher(agents),
         )
+
+    def _nexto_rows(self, agents: List[str], beta: float) -> Dict[str, np.ndarray]:
+        if self.nexto is None:
+            from ..opponents.nexto import NextoOpponent
+            self.nexto = NextoOpponent(beta=beta, seed=self.seed)
+            self.nexto.new_game(self._pads())
+            self.nexto.on_reset(self.env.state)
+        self.nexto.beta = float(beta)
+        return self.nexto.act(agents, self.env.state)
 
     def step(self, actions: np.ndarray) -> StepResult:
         env, current = self.env, self.current
         action_dict = {a: np.array([int(actions[i])], dtype=np.int64) for i, a in enumerate(current.agents)}
+        nexto_agents = [a for i, a in enumerate(current.agents) if int(actions[i]) < 0]
+        if nexto_agents:
+            beta = nexto_beta_of(int(actions[current.agents.index(nexto_agents[0])]))
+            action_dict.update(self._nexto_rows(nexto_agents, beta))
         obs_dict, rew_dict, term_dict, trunc_dict = env.step(action_dict)
         self.tracker.step(env.state)
         rewards = np.array([rew_dict[a] for a in current.agents], dtype=np.float32)
@@ -96,7 +171,8 @@ class EnvRunner:
             self.current = self.reset()
             return StepResult(rewards, True, terminated, final_obs, summary, self.current)
         self.current = EpisodeStart(current.agents, current.teams,
-                                    np.stack([obs_dict[a] for a in current.agents]).astype(np.float32))
+                                    np.stack([obs_dict[a] for a in current.agents]).astype(np.float32),
+                                    self._teacher(current.agents))
         return StepResult(rewards, False, False, None, None, self.current)
 
     def set_global_step(self, step: int) -> None:
@@ -149,6 +225,11 @@ class LocalPolicy:
     def new_slot(self, start: EpisodeStart):
         from .collector import EnvSlot
         slot = EnvSlot(episode=start)
+        nx = self.hist.get("nexto") or {}
+        if float(nx.get("prob", 0.0)) > 0.0 and self.rng.random() < float(nx["prob"]):
+            slot.hist_team = self.rng.choice([0, 1])
+            slot.hist_entry = {"id": "nexto", "kind": "nexto", "beta": float(nx.get("beta", 1.0)), "elo": 0.0}
+            return slot
         entries = self.hist["entries"]
         # même tirage que le collecteur central (Collector._new_slot) avec la loi de tirage du pool
         if entries and self.rng.random() < float(self.hist["hist_prob"]):

@@ -344,6 +344,12 @@ def summarize_episodes(episodes: List[Dict[str, Any]]) -> Dict[str, float]:
         out[f"vs_anchor/{name}/episodes"] = len(eps)
         out[f"vs_anchor/{name}/win_rate"] = float(np.mean([r == 1.0 for r in res]))
         out[f"vs_anchor/{name}/loss_rate"] = float(np.mean([r == 0.0 for r in res]))
+    nx = [e for e in episodes if "vs_nexto" in e]
+    if nx:
+        res = [_nexto_score(e) for e in nx]
+        out["vs_nexto/episodes"] = len(nx)
+        out["vs_nexto/win_rate"] = float(np.mean([r == 1.0 for r in res]))
+        out["vs_nexto/loss_rate"] = float(np.mean([r == 0.0 for r in res]))
     if hist:
         res = [_hist_score(e) for e in hist]
         out["vs_hist/episodes"] = len(hist)
@@ -354,6 +360,25 @@ def summarize_episodes(episodes: List[Dict[str, Any]]) -> Dict[str, float]:
             out["vs_hist/kickoff_win_rate"] = float(np.mean(
                 [e["kickoff_winner"] == e["vs_hist"]["learner_team"] for e in kick]))
     return out
+
+
+def kick_coef_at(cfg: Dict[str, Any], step: float) -> float:
+    """`train.kickstart` (session 10) : imitation de Nexto, poids `coef` au step `begin`, puis linéaire jusqu'à 0 à
+    `begin + steps` (les workers n'étiquettent plus rien ensuite)."""
+    k = (cfg.get("train") or {}).get("kickstart") or {}
+    if not k.get("enabled"):
+        return 0.0
+    begin, steps = float(k.get("begin", 0)), float(k.get("steps", 0))
+    if steps <= 0 or step < begin or step >= begin + steps:
+        return 0.0
+    return float(k.get("coef", 0.0)) * (1.0 - (step - begin) / steps)
+
+
+def _nexto_score(e: Dict[str, Any]) -> float:
+    g = e["goal_team"]
+    if g is None:
+        return 0.5
+    return 1.0 if g == e["vs_nexto"]["learner_team"] else 0.0
 
 
 def _hist_score(e: Dict[str, Any]) -> float:
@@ -568,6 +593,12 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         }
 
     tr, sp = cfg["train"], cfg["selfplay"]
+    if cfg["env"].get("engine", "rocketsim") != "fake" and (
+            float((sp.get("nexto") or {}).get("prob", 0.0)) > 0.0 or (tr.get("kickstart") or {}).get("enabled")):
+        from .opponents.nexto import load_model as load_nexto       # échoue tout de suite si le modèle manque
+        load_nexto()
+        print(f"[train] Nexto : sparring {float((sp.get('nexto') or {}).get('prob', 0.0)):.0%} des épisodes, "
+              f"imitation {'oui' if (tr.get('kickstart') or {}).get('enabled') else 'non'}")
     next_ckpt = (global_step // int(tr["checkpoint_every_steps"]) + 1) * int(tr["checkpoint_every_steps"])
     next_pool = (global_step // int(sp["pool_every_steps"]) + 1) * int(sp["pool_every_steps"])
     next_milestone = (global_step // milestone_every + 1) * milestone_every if milestone_every > 0 else 0
@@ -659,6 +690,10 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
               + (" ; plus de retour permis : arrêt" if last else ""))
         return not last
 
+    nx_cfg = sp.get("nexto") or {}
+    nexto_scores: List[float] = []
+    nexto_window = int(nx_cfg.get("promote_window", 300))
+    nexto_promote = float(nx_cfg.get("promote_score", 0.3))
     try:
         t_tail = 0.0
         if async_collect:
@@ -691,8 +726,19 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             t_batch = time.perf_counter() - t0
             # minibatch du palier du lot collecté (ppo.batch_schedule), sans modifier la config sauvegardée
             stage_ppo = {} if skills is None else {k: v for k, v in skills.ppo_overrides().items() if k == "ent_coef"}
+            kick_coef = kick_coef_at(cfg, global_step - n)
             upd_cfg = {**cfg, "ppo": {**cfg["ppo"], "minibatch_size": scheduled_batch(cfg, global_step - n)[1],
-                                      **stage_ppo}}
+                                      **stage_ppo, "kick_coef": kick_coef}}
+            # Nexto en sparring : beta de départ (échantillonné) puis argmax dès qu'on lui prend assez de points
+            nx_set = getattr(collector, "nexto", None)
+            if nx_set and nx_set.get("prob", 0.0) > 0.0:
+                nexto_scores.extend(_nexto_score(e) for e in episodes if "vs_nexto" in e)
+                del nexto_scores[:-nexto_window]
+                if (nx_set["beta"] < 1.0 and len(nexto_scores) >= nexto_window
+                        and float(np.mean(nexto_scores)) >= nexto_promote):
+                    nx_set["beta"] = 1.0
+                    nexto_scores.clear()
+                    print(f"[train] Nexto passe en argmax à {global_step:,} steps")
             si_before = norms.flat(actor_si)
             actor_lr = optimizer.param_groups[0]["lr"]
             if critic_warmup > 0:                  # lr 0 : Adam n'applique aucun pas à l'acteur, ses moments se remplissent
@@ -736,6 +782,8 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                 "reward/mean_step": float(batch["raw_rewards"].mean()),
                 "reward/scale": float(batch["reward_scale"]),
                 "trajectories": len(trajs), "pool_size": len(pool), "learn/batch_steps": n,
+                "learn/kick_coef": kick_coef,
+                **({"vs_nexto/beta": float(nx_set["beta"])} if nx_set and nx_set.get("prob", 0.0) > 0.0 else {}),
                 **({} if curriculum is None else curriculum.metrics()),
                 **{f"learn/{k}": v for k, v in stats.items()},
                 **summarize_episodes(episodes),
