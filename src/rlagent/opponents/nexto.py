@@ -217,16 +217,30 @@ def fidelity_report() -> dict:
     return _report("nexto", KNOWN_GAPS)
 
 
-# Point d'entrée commun aux scripts d'audit : spécifications `necto[:beta]` et `nexto[:beta]`.
+# Point d'entrée commun aux scripts d'audit : `necto`, `nexto`, `galactus`, `kira`, `rain` (chacun `[:beta]`).
 def is_bot_spec(spec: str) -> bool:
-    return is_necto_spec(spec) or is_nexto_spec(spec)
+    from rlagent.opponents.galactus import is_galactus_spec
+    from rlagent.opponents.gigalearn import is_gigalearn_spec
+    return is_necto_spec(spec) or is_nexto_spec(spec) or is_galactus_spec(spec) or is_gigalearn_spec(spec)
 
 
 def bot_from_spec(spec: str, seed: int | None = None) -> NectoOpponent:
+    from rlagent.opponents.galactus import GalactusOpponent, is_galactus_spec
+    from rlagent.opponents.gigalearn import GigaLearnOpponent, is_gigalearn_spec
+    if is_galactus_spec(spec):
+        return GalactusOpponent.from_spec(spec, seed=seed)
+    if is_gigalearn_spec(spec):
+        return GigaLearnOpponent.from_spec(spec, seed=seed)
     return (NextoOpponent if is_nexto_spec(spec) else NectoOpponent).from_spec(spec, seed=seed)
 
 
 def bot_fidelity(spec: str) -> dict:
+    from rlagent.opponents.galactus import fidelity_report as galactus_report, is_galactus_spec
     from rlagent.opponents.necto import fidelity_report as necto_report
+    from rlagent.opponents.gigalearn import fidelity_report as giga_report, is_gigalearn_spec
+    if is_galactus_spec(spec):
+        return galactus_report()
+    if is_gigalearn_spec(spec):
+        return giga_report(spec)
     return fidelity_report() if is_nexto_spec(spec) else necto_report()
 

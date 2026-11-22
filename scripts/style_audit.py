@@ -4,6 +4,8 @@
     python scripts/style_audit.py --a <nouvel agent> --b runs/s10_ppo_kaggle/best_actor.pt --det-a --games 40
     python scripts/style_audit.py --a <agent> --b necto --det-a --games 40       # Necto (NectoFamily), argmax
     python scripts/style_audit.py --a <agent> --b nexto --det-a --games 40       # Nexto (Necto v2), argmax
+    python scripts/style_audit.py --a <agent> --b galactus --det-a --games 40    # GalactusV2 (GigaLearn), argmax
+    python scripts/style_audit.py --a <agent> --b rain --det-a --games 40        # Rain ; kira : 1v1, argmax
 
 `necto` / `necto:<beta>` : le vrai Necto via l'adaptateur `rlagent/opponents/necto.py` ; `nexto` / `nexto:<beta>` :
 Nexto via `rlagent/opponents/nexto.py` (kickoffs à beta 0,5 comme le bot). Fidélité mesurée par
