@@ -21,7 +21,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -31,6 +31,7 @@ from . import accel
 from .algo import norms
 from .algo.collector import make_collector
 from .algo.gae import RunningStats
+from .algo.worker import sparring_settings
 from .algo.learner import adapt_actor_lr, build_batch, make_optimizer, ppo_update
 from .config import load_config
 from .curriculum import SkillCurriculum
@@ -161,6 +162,20 @@ def list_milestones(run_dir: Path) -> List[tuple]:
         except (IndexError, ValueError):
             pass
     return out
+
+
+def reject_milestones(run_dir: Path, spans: List[tuple]) -> List[str]:
+    """Jalons écrits pendant une dérive annulée (to_step < step <= at_step d'un retour en arrière) : rangés dans
+    checkpoints/milestones/rejected/. Sinon un retour suivant pourrait les choisir (session 10 : le jalon 27,50 G, pris
+    pendant la chute, avait la même note que celui de 27,25 G et gagnait l'égalité par son step)."""
+    moved = []
+    for st, p in list_milestones(run_dir):
+        if any(int(lo) < st <= int(hi) for lo, hi in spans):
+            out = p.parent / "rejected"
+            out.mkdir(exist_ok=True)
+            p.replace(out / p.name)
+            moved.append(p.name)
+    return moved
 
 
 def pick_milestone(run_dir: Path, ladder: Optional[Ladder], before_step: float, window: int = 4) -> Optional[tuple]:
@@ -344,12 +359,15 @@ def summarize_episodes(episodes: List[Dict[str, Any]]) -> Dict[str, float]:
         out[f"vs_anchor/{name}/episodes"] = len(eps)
         out[f"vs_anchor/{name}/win_rate"] = float(np.mean([r == 1.0 for r in res]))
         out[f"vs_anchor/{name}/loss_rate"] = float(np.mean([r == 0.0 for r in res]))
-    nx = [e for e in episodes if "vs_nexto" in e]
-    if nx:
-        res = [_nexto_score(e) for e in nx]
-        out["vs_nexto/episodes"] = len(nx)
-        out["vs_nexto/win_rate"] = float(np.mean([r == 1.0 for r in res]))
-        out["vs_nexto/loss_rate"] = float(np.mean([r == 0.0 for r in res]))
+    by_bot: Dict[str, List[Dict[str, Any]]] = {}
+    for e in episodes:
+        if "vs_bot" in e:
+            by_bot.setdefault(e["vs_bot"]["bot"], []).append(e)
+    for name, eps in by_bot.items():                   # bots de sparring : vs_nexto/*, vs_galactus/*…
+        res = [_bot_score(e) for e in eps]
+        out[f"vs_{name}/episodes"] = len(eps)
+        out[f"vs_{name}/win_rate"] = float(np.mean([r == 1.0 for r in res]))
+        out[f"vs_{name}/loss_rate"] = float(np.mean([r == 0.0 for r in res]))
     if hist:
         res = [_hist_score(e) for e in hist]
         out["vs_hist/episodes"] = len(hist)
@@ -374,11 +392,21 @@ def kick_coef_at(cfg: Dict[str, Any], step: float) -> float:
     return float(k.get("coef", 0.0)) * (1.0 - (step - begin) / steps)
 
 
-def _nexto_score(e: Dict[str, Any]) -> float:
+def _bot_score(e: Dict[str, Any]) -> float:
     g = e["goal_team"]
     if g is None:
         return 0.5
-    return 1.0 if g == e["vs_nexto"]["learner_team"] else 0.0
+    return 1.0 if g == e["vs_bot"]["learner_team"] else 0.0
+
+
+def sparring_promotion(sp_cfg: Dict[str, Any], name: str) -> Tuple[int, float, float]:
+    """(fenêtre, score, pas) de la montée en beta d'un bot de sparring : `selfplay.sparring` puis les clés du bot.
+    Ancienne clé `selfplay.nexto` : passage direct à l'argmax (pas 1)."""
+    sparring = sp_cfg.get("sparring") or {}
+    base = sparring if sparring.get("bots") else (sp_cfg.get("nexto") or {})
+    own = (sparring.get("bots") or {}).get(name) or {}
+    get = lambda k, d: own.get(k, base.get(k, d))   # noqa: E731
+    return int(get("promote_window", 300)), float(get("promote_score", 0.3)), float(get("promote_step", 1.0))
 
 
 def _hist_score(e: Dict[str, Any]) -> float:
@@ -430,6 +458,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
     optimizer = make_optimizer(actor, critic, cfg)
     ret_stats = RunningStats()
     global_step, iteration, elo = 0, 0, 1000.0
+    saved_betas: Dict[str, float] = {}
     curriculum = DrillCurriculum.from_cfg(cfg)
     skills = SkillCurriculum.from_cfg(cfg)
 
@@ -453,6 +482,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             # pouvoir s'adapter (sinon des millions d'échantillons passés la figent)
             ret_stats.count = min(ret_stats.count, 1e6)
         norm_targets = ck.get("norm_targets")
+        saved_betas = dict(ck.get("sparring_betas") or {})
         if warm_start and norm_ctl.get("reset_on_init"):
             before = norms.flat(si_layers).norm()
             norms.reset_norms(si_layers, fresh_norms, optimizer)
@@ -512,6 +542,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
 
     def reject_after(step: int) -> int:
         gone = pool.reject_after(step)
+        reject_milestones(run_dir, [(step, float("inf"))])
         # l'échelle peut noter des versions absentes du pool (pool partiel rapatrié par kaggle_sync fetch) : elles
         # sortent aussi, sinon la « dernière version » resterait une version de la dérive (ladder/drop de 664 mesuré)
         later = [v for v, s in (ladder.players.items() if ladder is not None else []) if s > step]
@@ -544,6 +575,9 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
         guard.save()
         print(f"[train] retour à {src.name} (step {int(meta['global_step']):,}) : {n_rej} versions plus récentes "
               f"rangées dans pool/rejected/, critique recalé pendant {critic_warmup} itérations")
+    old_drift = reject_milestones(run_dir, [(r["to_step"], r["at_step"]) for r in guard.state.get("rollbacks", [])])
+    if old_drift:
+        print(f"[train] jalons d'une dérive annulée rangés dans milestones/rejected/ : {', '.join(old_drift)}")
     if guard.reenabled_now:
         print(f"[train] garde-fou : termes remis en jeu (train.guard.reenable_terms) : {guard.reenabled_now}")
     if guard.disabled_terms:
@@ -579,6 +613,13 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
     except ValueError:  # pas dans le thread principal
         pass
 
+    def sparring_betas() -> Dict[str, float]:
+        try:
+            col = collector
+        except NameError:                     # checkpoint écrit avant la création du collecteur
+            return {}
+        return {k: float(v["beta"]) for k, v in (getattr(col, "sparring", None) or {}).items()}
+
     def make_state() -> Dict[str, Any]:
         # tenseurs copiés sur CPU : checkpoint relisible sur n'importe quelle machine (et torch.save ne gère pas XLA)
         return {
@@ -588,17 +629,24 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             "curriculum": None if curriculum is None else curriculum.state_dict(),
             "skill_curriculum": None if skills is None else skills.state_dict(),
             "norm_targets": norm_targets,
+            "sparring_betas": sparring_betas(),
             "cfg": cfg, "obs_dim": obs_dim(*env_obs_flags(cfg["env"])),
             "n_actions": N_ACTIONS, "saved_at": datetime.now().isoformat(),
         }
 
     tr, sp = cfg["train"], cfg["selfplay"]
-    if cfg["env"].get("engine", "rocketsim") != "fake" and (
-            float((sp.get("nexto") or {}).get("prob", 0.0)) > 0.0 or (tr.get("kickstart") or {}).get("enabled")):
-        from .opponents.nexto import load_model as load_nexto       # échoue tout de suite si le modèle manque
+    sparring_cfg = sparring_settings(cfg)
+    if sparring_cfg:
+        from .opponents.nexto import bot_from_spec                  # échoue tout de suite si un modèle manque
+        for name in sparring_cfg:
+            bot_from_spec(name)
+        print("[train] sparring : " + ", ".join(f"{n} {b['prob']:.0%} (beta {b['beta']:g})"
+                                                for n, b in sparring_cfg.items())
+              + f" ; {sum(b['prob'] for b in sparring_cfg.values()):.0%} des épisodes")
+    if cfg["env"].get("engine", "rocketsim") != "fake" and (tr.get("kickstart") or {}).get("enabled"):
+        from .opponents.nexto import load_model as load_nexto
         load_nexto()
-        print(f"[train] Nexto : sparring {float((sp.get('nexto') or {}).get('prob', 0.0)):.0%} des épisodes, "
-              f"imitation {'oui' if (tr.get('kickstart') or {}).get('enabled') else 'non'}")
+        print("[train] imitation de Nexto (train.kickstart) : oui")
     next_ckpt = (global_step // int(tr["checkpoint_every_steps"]) + 1) * int(tr["checkpoint_every_steps"])
     next_pool = (global_step // int(sp["pool_every_steps"]) + 1) * int(sp["pool_every_steps"])
     next_milestone = (global_step // milestone_every + 1) * milestone_every if milestone_every > 0 else 0
@@ -690,10 +738,14 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
               + (" ; plus de retour permis : arrêt" if last else ""))
         return not last
 
-    nx_cfg = sp.get("nexto") or {}
-    nexto_scores: List[float] = []
-    nexto_window = int(nx_cfg.get("promote_window", 300))
-    nexto_promote = float(nx_cfg.get("promote_score", 0.3))
+    # Bots de sparring : beta de départ (échantillonné, plus faible), qui monte de `promote_step` (jusqu'à 1 = argmax)
+    # dès que notre score moyen contre ce bot atteint `promote_score` sur ses `promote_window` derniers épisodes.
+    # Un beta déjà atteint est repris du checkpoint (jamais en dessous du beta_start de la config).
+    for name, b in (getattr(collector, "sparring", None) or {}).items():
+        if name in saved_betas and float(saved_betas[name]) > float(b["beta"]):
+            b["beta"] = float(saved_betas[name])
+            print(f"[train] sparring : {name} reprend à beta {b['beta']:g} (checkpoint)")
+    bot_scores: Dict[str, List[float]] = {}
     try:
         t_tail = 0.0
         if async_collect:
@@ -729,16 +781,16 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
             kick_coef = kick_coef_at(cfg, global_step - n)
             upd_cfg = {**cfg, "ppo": {**cfg["ppo"], "minibatch_size": scheduled_batch(cfg, global_step - n)[1],
                                       **stage_ppo, "kick_coef": kick_coef}}
-            # Nexto en sparring : beta de départ (échantillonné) puis argmax dès qu'on lui prend assez de points
-            nx_set = getattr(collector, "nexto", None)
-            if nx_set and nx_set.get("prob", 0.0) > 0.0:
-                nexto_scores.extend(_nexto_score(e) for e in episodes if "vs_nexto" in e)
-                del nexto_scores[:-nexto_window]
-                if (nx_set["beta"] < 1.0 and len(nexto_scores) >= nexto_window
-                        and float(np.mean(nexto_scores)) >= nexto_promote):
-                    nx_set["beta"] = 1.0
-                    nexto_scores.clear()
-                    print(f"[train] Nexto passe en argmax à {global_step:,} steps")
+            sparring = getattr(collector, "sparring", None) or {}
+            for name, b in sparring.items():
+                window, target, step_up = sparring_promotion(sp, name)
+                scores = bot_scores.setdefault(name, [])
+                scores.extend(_bot_score(e) for e in episodes if e.get("vs_bot", {}).get("bot") == name)
+                del scores[:-window]
+                if b["beta"] < 1.0 and len(scores) >= window and float(np.mean(scores)) >= target:
+                    b["beta"] = min(1.0, round(float(b["beta"]) + step_up, 2))
+                    scores.clear()
+                    print(f"[train] sparring : {name} passe à beta {b['beta']:g} à {global_step:,} steps")
             si_before = norms.flat(actor_si)
             actor_lr = optimizer.param_groups[0]["lr"]
             if critic_warmup > 0:                  # lr 0 : Adam n'applique aucun pas à l'acteur, ses moments se remplissent
@@ -783,7 +835,7 @@ def train(cfg: Dict[str, Any], run_dir: Path, resume_from: Optional[Path] = None
                 "reward/scale": float(batch["reward_scale"]),
                 "trajectories": len(trajs), "pool_size": len(pool), "learn/batch_steps": n,
                 "learn/kick_coef": kick_coef,
-                **({"vs_nexto/beta": float(nx_set["beta"])} if nx_set and nx_set.get("prob", 0.0) > 0.0 else {}),
+                **{f"vs_{n}/beta": float(b["beta"]) for n, b in sparring.items()},
                 **({} if curriculum is None else curriculum.metrics()),
                 **{f"learn/{k}": v for k, v in stats.items()},
                 **summarize_episodes(episodes),

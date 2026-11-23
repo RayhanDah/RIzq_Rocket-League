@@ -6,7 +6,7 @@ import pytest
 import torch
 from helpers import make_state
 
-from rlagent.algo.collector import EnvSlot, Rollout, Trajectory, nexto_settings
+from rlagent.algo.collector import EnvSlot, Rollout, Trajectory
 from rlagent.algo.learner import build_batch, ppo_update
 from rlagent.algo.gae import RunningStats
 from rlagent.algo.worker import EpisodeStart, StepResult, nexto_action_code, nexto_beta_of
@@ -66,16 +66,16 @@ def test_new_stages_are_slow_gated_and_capped(cfg):
     assert V25785 in cfg["selfplay"]["anchors"]
 
 
-def test_nexto_sparring_and_kickstart_settings(cfg):
-    nx = cfg["selfplay"]["nexto"]
-    assert nx["prob"] == 0.10 and nx["beta_start"] == 0.5
-    assert nexto_settings(cfg) == {"prob": 0.10, "beta": 0.5}
-    assert nexto_settings({**cfg, "env": {**cfg["env"], "engine": "fake"}})["prob"] == 0.0
-    k = cfg["train"]["kickstart"]
-    assert k["enabled"] and k["begin"] == 27_450_134_560 and k["coef"] == 0.5
-    assert kick_coef_at(cfg, k["begin"]) == 0.5
-    assert kick_coef_at(cfg, k["begin"] + k["steps"] / 2) == pytest.approx(0.25)
-    assert kick_coef_at(cfg, k["begin"] + k["steps"]) == 0.0 and kick_coef_at(cfg, k["begin"] - 1) == 0.0
+def test_kickstart_schedule_and_disabled_after_session_10(cfg):
+    # session 10 : l'imitation a fait perdre ~350 Elo en 13 M steps -> coupée (session 11, décision PO du 23/11)
+    assert not cfg["train"]["kickstart"]["enabled"]
+    assert kick_coef_at(cfg, 27_460_000_000) == 0.0
+    k = {**cfg["train"]["kickstart"], "enabled": True}
+    c = {**cfg, "train": {**cfg["train"], "kickstart": k}}
+    assert k["begin"] == 27_450_134_560 and k["coef"] == 0.5
+    assert kick_coef_at(c, k["begin"]) == 0.5
+    assert kick_coef_at(c, k["begin"] + k["steps"] / 2) == pytest.approx(0.25)
+    assert kick_coef_at(c, k["begin"] + k["steps"]) == 0.0 and kick_coef_at(c, k["begin"] - 1) == 0.0
 
 
 def test_new_terms_are_built(cfg):
@@ -203,7 +203,7 @@ def test_rollout_leaves_nexto_cars_to_the_worker_and_aligns_teacher_labels():
 
     def new_slot(st):
         slot = EnvSlot(episode=st)
-        slot.hist_team, slot.hist_entry = 1, {"id": "nexto", "kind": "nexto", "beta": 0.5, "elo": 0.0}
+        slot.hist_team, slot.hist_entry = 1, {"id": "nexto", "kind": "bot", "bot": "nexto", "beta": 0.5, "elo": 0.0}
         return slot
     r = Rollout([start], new_slot)
     a = r.act([0], Actor(), torch.device("cpu"), lambda e: None)
@@ -216,7 +216,7 @@ def test_rollout_leaves_nexto_cars_to_the_worker_and_aligns_teacher_labels():
     trajs, eps = r.cut()
     t = trajs[0].compact()
     assert t.teachers.tolist() == [-1, 7] and len(t) == 2
-    assert eps[0]["vs_nexto"] == {"learner_team": 0, "beta": 0.5} and "vs_hist" not in eps[0]
+    assert eps[0]["vs_bot"] == {"bot": "nexto", "learner_team": 0, "beta": 0.5} and "vs_hist" not in eps[0]
 
 
 def test_kickstart_loss_pulls_the_policy_toward_the_teacher(cfg):
@@ -247,7 +247,8 @@ def test_env_runner_plays_nexto_and_labels_teacher_actions(cfg):
     if not meshes.is_dir():
         pytest.skip("collision meshes absents")
     from rlagent.algo.worker import EnvRunner
-    c = {**cfg, "train": {**cfg["train"], "kickstart": {**cfg["train"]["kickstart"], "begin": 0, "frac": 1.0}}}
+    c = {**cfg, "train": {**cfg["train"], "kickstart": {**cfg["train"]["kickstart"], "enabled": True, "begin": 0,
+                                                         "frac": 1.0}}}
     r = EnvRunner(c, seed=3)
     r.set_global_step(10)
     cur = r.current

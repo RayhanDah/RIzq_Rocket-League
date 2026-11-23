@@ -855,3 +855,72 @@ Tests : `tests/test_paliers_18_20.py`, nouvelles entrées de `tests/test_exploit
 - Kickoff et aériennes : 1er contact contre Necto au-dessus de 10 % ; vraies aériennes contre Nexto au-dessus de 0,3 / min.
 - Buts après bump ou démo, touches depuis le mur : en hausse en auto-jeu.
 - Vrai jeu : BO3 gagnés contre v25785 et contre Necto.
+
+### Résultat de la session 10 (Kaggle version 11, 22/11/2026) : échec, imitation coupée
+- La session n'a duré que ~27 min, dont ~10 min d'entraînement (27,45 → 27,51 G steps).
+- Le bot s'est effondré dès les premiers millions de steps d'imitation :
+
+| Steps | Elo de l'échelle | Écart vs v25785 | Accord avec Nexto | Touches / min |
+|---|---|---|---|---|
+| 27,450 G | 965 | — | — | 38 |
+| 27,463 G | 649 | −353 | 30 % | 45 |
+| 27,470 G | 508 | −476 | 31 % | 50 |
+| 27,515 G | 729 | −225 | 35 % | 63 |
+
+- Lecture : l'entropie croisée (0,5 × ~2,5) pesait bien plus que la perte PPO. Le bot copiait le style de Nexto (plus de
+  touches) sans que ses décisions tiennent ensemble. Contre Nexto (beta 0,5), il perdait toujours 85-97 % des parties.
+- Le garde-fou a réagi (« ladder/drop 282 > 120 ») et rechargé le jalon 27,25 G, puis le run a planté :
+  `FileNotFoundError` sur `pool/actor_0027505164789.pt`. La collecte suivante, déjà lancée, jouait contre une version que
+  le retour en arrière venait de ranger dans `pool/rejected/`.
+- Le dernier checkpoint (`ckpt_0027514914029.pt`) contient bien les poids du jalon 27,25 G (vérifié : écart nul).
+
+## 17. Session 11 : sparring contre quatre bots, sans imitation (23/11/2026)
+Décisions du PO :
+1. Plus d'imitation (`train.kickstart.enabled: false`).
+2. Sparring contre plusieurs bots externes, chacun avec sa part des épisodes et son beta.
+
+**Sparring** (`selfplay.sparring`, `algo/worker.py`) :
+- Bots : Nexto, GalactusV2, Kira, Rain (adaptateurs `opponents/`). Code d'action −(1 + 1000·indice + 100·beta) ;
+  Nexto garde le code de la session 10.
+- Beta de départ par bot, qui monte de 0,1 dès que notre score moyen contre lui atteint 0,35 sur ses 300 derniers
+  épisodes. Le beta atteint est gardé dans le checkpoint.
+- Métriques `vs_<bot>/episodes`, `win_rate`, `loss_rate`, `beta`. Ces parties ne comptent ni pour l'Elo ni pour le
+  classement.
+- Calibration (v25785 échantillonné, 24 matchs par bot, part de nos buts) :
+
+| Bot | beta 0,3 | beta 0,5 |
+|---|---|---|
+| Nexto | — | 19 % |
+| GalactusV2 | 26 % | 8 % |
+| Kira | 38 % | 11 % |
+| Rain | — | 54 % |
+
+| Bot | Part des épisodes | Beta de départ |
+|---|---|---|
+| GalactusV2 | 4 % | 0,3 |
+| Kira | 4 % | 0,3 |
+| Nexto | 3 % | 0,5 |
+| Rain | 3 % | 0,5 |
+
+- Coût : un step contre un bot coûte 4,8-7,4 ms au lieu de 1,8 ms (portable, 1 thread), soit ~+30 % de temps de
+  simulation pour 14 % des parties.
+- Sur Kaggle : les poids GigaLearn partent dans le dataset `rl-agent-opponents` (archive `opponents-bots.zip`,
+  redéposée seulement si les fichiers changent) ; `run_cloud.sh` règle `RLAGENT_GALACTUS_DIR`, `RLAGENT_KIRA_DIR`,
+  `RLAGENT_RAIN_DIR`.
+
+**Correctifs** :
+- Une version rangée dans `pool/rejected/` par un retour en arrière reste chargeable (`selfplay/pool.py:version_path`) :
+  plus de plantage pendant une collecte en cours.
+- Les jalons écrits pendant une dérive annulée passent dans `checkpoints/milestones/rejected/` (au retour en arrière, et
+  au démarrage pour les retours déjà notés dans `guard.json`). Sinon le jalon 27,50 G, pris pendant la chute, aurait été
+  choisi par le retour suivant : même note que 27,25 G, step plus récent.
+
+Reprise : depuis `ckpt_0027514914029.pt` (poids de 27,25 G), palier 17 « but_haut ».
+
+Tests : `tests/test_sparring.py`.
+
+### Critères pour la session 11
+- Contre Nexto, Galactus, Kira et Rain en argmax (sim) : part de nos buts en hausse par rapport à v25785 (19,9 % contre
+  Nexto, 2-7 % contre les GigaLearn).
+- Contre Necto (sim) : au moins 75 % des buts ; écart contre v25785 positif sur l'échelle.
+- Vrai jeu : BO3 gagnés contre v25785 et contre Necto.

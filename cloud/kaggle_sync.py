@@ -42,6 +42,9 @@ MESHES_DATASET = "rl-collision-meshes"
 INIT_DATASET = "rl-agent-init"
 OPP_DATASET = "rl-agent-opponents"                 # modèle de Nexto (sparring et imitation, session 10)
 NEXTO_MODEL = ROOT / "dist" / "opponents" / "NectoFamily" / "nexto" / "nexto-model.pt"
+# bots de sparring GigaLearn (poids .lt), rangés comme dans dist/opponents
+BOT_WEIGHTS = ["GalactusV2/rlbot", "Kira/rlbot", "RainStream/rlbot/checkpoint_1v1", "RainStream/rlbot/checkpoint_2v2",
+               "RainStream/rlbot/checkpoint_3v3"]
 # machine_shape de Kaggle (kernel-metadata.json) : « GPU T4 x2 » et « TPU v5e-8 »
 ACCELERATORS = {"gpu": "NvidiaTeslaT4", "tpu": "TpuV5E8", "none": None}
 MAX_EMBEDDED = 900_000                             # octets de base64 : au-delà, le notebook devient trop lourd
@@ -201,6 +204,30 @@ def build_notebook(params: dict, code_b64: str) -> dict:
     return nb
 
 
+def opponent_files() -> tuple:
+    """Fichiers du dataset des adversaires : le modèle de Nexto et une archive des poids GigaLearn (même arborescence
+    que dist/opponents, décompressée par run_cloud.sh), avec une empreinte pour ne redéposer qu'en cas de changement."""
+    import hashlib
+
+    if not NEXTO_MODEL.exists():
+        sys.exit(f"{NEXTO_MODEL} absent (clone NectoFamily) : impossible de déposer le dataset {OPP_DATASET}")
+    opp_dir = NEXTO_MODEL.parents[2]
+    lts = sorted(f for d in BOT_WEIGHTS for f in (opp_dir / d).glob("*.lt"))
+    missing = [d for d in BOT_WEIGHTS if not any((opp_dir / d).glob("*.lt"))]
+    if missing:
+        sys.exit(f"poids absents dans {opp_dir} : {', '.join(missing)} (cloner les bots du botpack)")
+    WORK.mkdir(parents=True, exist_ok=True)
+    out = WORK / "opponents-bots.zip"
+    h = hashlib.sha256(NEXTO_MODEL.read_bytes())
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as zf:
+        for f in lts:
+            rel = f.relative_to(opp_dir).as_posix()
+            zf.write(f, rel)
+            h.update(rel.encode())
+            h.update(f.read_bytes())
+    return [NEXTO_MODEL, out], h.hexdigest()
+
+
 def code_b64() -> str:
     from make_cloud_bundle import build_code_zip
 
@@ -250,10 +277,13 @@ def cmd_launch(args) -> None:
         state.pop(args.run_name, None)
     sources = [meshes]
     opp = f"{username(k)}/{OPP_DATASET}"
-    if k and not dataset_exists(k, opp):
-        if not NEXTO_MODEL.exists():
-            sys.exit(f"{NEXTO_MODEL} absent (clone NectoFamily) : impossible de déposer le dataset {opp}")
-        upload_dataset(k, OPP_DATASET, "rl agent opponents", [NEXTO_MODEL], "modèle de Nexto (NectoFamily)")
+    if k:
+        files, digest = opponent_files()
+        if not dataset_exists(k, opp) or state.get("_opponents_digest") != digest:
+            upload_dataset(k, OPP_DATASET, "rl agent opponents", files,
+                           "Nexto (NectoFamily) + GalactusV2, Kira, Rain (sparring)")
+            state["_opponents_digest"] = digest
+            save_state(state)
     sources.append(opp)
     if args.init or (args.anchors_from and (status is None or args.fresh or args.dry_run)):
         # --init : démarrage à chaud ; --anchors-from seul (1re session d'un run de zéro) : ancres seules

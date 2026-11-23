@@ -32,7 +32,8 @@ import torch
 
 from ..models.attention import fit_obs
 from ..models.stacked import StackedActors, pad_stack, stack_signature
-from .worker import EpisodeStart, StepResult, nexto_action_code, worker_main
+from .worker import (EpisodeStart, StepResult, bot_action_code, pick_sparring, sparring_entry, sparring_settings,
+                     worker_main)
 
 
 @dataclass
@@ -130,13 +131,13 @@ class Rollout:
         for w in ids:
             slot = self.slots[w]
             learn = slot.learning_mask()
-            nexto = slot.hist_entry is not None and slot.hist_entry.get("kind") == "nexto"
+            bot = slot.hist_entry is not None and slot.hist_entry.get("kind") == "bot"
             for j in range(len(slot.episode.agents)):
                 if learn[j]:
                     cur_rows.append((w, j))
                     cur_obs.append(slot.episode.obs[j])
-                elif nexto:
-                    continue                      # Nexto joue dans le worker (code d'action fixé plus bas)
+                elif bot:
+                    continue                      # le bot de sparring joue dans le worker (code d'action fixé plus bas)
                 else:
                     g = hist_groups.setdefault(slot.hist_entry["id"], (slot.hist_entry, [], []))
                     g[1].append((w, j))
@@ -144,8 +145,9 @@ class Rollout:
         actions = {w: np.zeros(len(self.slots[w].episode.agents), dtype=np.int64) for w in ids}
         for w in ids:
             slot = self.slots[w]
-            if slot.hist_entry is not None and slot.hist_entry.get("kind") == "nexto":
-                actions[w][~slot.learning_mask()] = nexto_action_code(slot.hist_entry.get("beta", 1.0))
+            if slot.hist_entry is not None and slot.hist_entry.get("kind") == "bot":
+                actions[w][~slot.learning_mask()] = bot_action_code(slot.hist_entry["bot"],
+                                                                    slot.hist_entry.get("beta", 1.0))
 
         # Toutes les inférences sont lancées avant de rapatrier un résultat : sur GPU, une seule attente par appel.
         cur = None
@@ -212,9 +214,9 @@ class Rollout:
                     traj.bootstrap_obs = None if res.terminated else res.final_obs[j]
                     self.done_trajs.append(traj)
                 summary = dict(res.summary)
-                if slot.hist_entry is not None and slot.hist_entry.get("kind") == "nexto":
-                    summary["vs_nexto"] = {"learner_team": 1 - slot.hist_team,
-                                           "beta": float(slot.hist_entry.get("beta", 1.0))}
+                if slot.hist_entry is not None and slot.hist_entry.get("kind") == "bot":
+                    summary["vs_bot"] = {"bot": slot.hist_entry["bot"], "learner_team": 1 - slot.hist_team,
+                                         "beta": float(slot.hist_entry.get("beta", 1.0))}
                 elif slot.hist_team is not None:
                     summary["vs_hist"] = {
                         "learner_team": 1 - slot.hist_team,
@@ -239,14 +241,6 @@ class Rollout:
         out = (self.done_trajs, self.episodes)
         self.done_trajs, self.episodes = [], []
         return out
-
-
-def nexto_settings(cfg: Dict[str, Any]) -> Dict[str, float]:
-    """`selfplay.nexto` : part des épisodes contre Nexto (`prob`) et beta de départ (`beta_start`, 1 = argmax).
-    train.py met à jour `beta` (passage à l'argmax quand on prend assez de buts à Nexto)."""
-    nx = (cfg.get("selfplay") or {}).get("nexto") or {}
-    fake = (cfg.get("env") or {}).get("engine", "rocketsim") == "fake"     # moteur factice des tests : pas d'arène
-    return {"prob": 0.0 if fake else float(nx.get("prob", 0.0)), "beta": float(nx.get("beta_start", 1.0))}
 
 
 def env_parts(n_envs: int, pipeline: int) -> List[Tuple[int, int]]:
@@ -327,7 +321,7 @@ class Collector(_WorkerPool):
         self.build_actor_fn = build_actor_fn
         self.hist_prob = float(cfg["selfplay"]["hist_prob"])
         self.rng = random.Random(seed)
-        self.nexto = nexto_settings(cfg)
+        self.sparring = sparring_settings(cfg)         # bot -> {"prob", "beta"} ; beta mis à jour par train.py
         # Plusieurs arènes par worker : lots d'inférence plus gros, moins d'allers-retours entre processus.
         self.envs_per_worker = int(envs_per_worker or cfg["train"].get("envs_per_worker", 1) or 1)
         self.parts = env_parts(self.envs_per_worker,
@@ -347,10 +341,11 @@ class Collector(_WorkerPool):
 
     def _new_slot(self, start: EpisodeStart) -> EnvSlot:
         slot = EnvSlot(episode=start)
-        nx = getattr(self, "nexto", None) or {}
-        if float(nx.get("prob", 0.0)) > 0.0 and self.rng.random() < float(nx["prob"]):
+        sparring = getattr(self, "sparring", None) or {}
+        bot = pick_sparring(sparring, self.rng) if sparring else None
+        if bot is not None:
             slot.hist_team = self.rng.choice([0, 1])
-            slot.hist_entry = {"id": "nexto", "kind": "nexto", "beta": float(nx.get("beta", 1.0)), "elo": 0.0}
+            slot.hist_entry = sparring_entry(bot, sparring)
             return slot
         if self.pool is not None and len(self.pool) > 0 and self.rng.random() < self.hist_prob:
             slot.hist_team = self.rng.choice([0, 1])
@@ -497,7 +492,7 @@ class LocalCollector(_WorkerPool):
         self.cfg = cfg
         self.pool = pool
         self.hist_prob = float(cfg["selfplay"]["hist_prob"])
-        self.nexto = nexto_settings(cfg)
+        self.sparring = sparring_settings(cfg)         # bot -> {"prob", "beta"} ; beta mis à jour par train.py
         self.envs_per_worker = int(envs_per_worker or cfg["train"].get("envs_per_worker", 1) or 1)
         self.conns, self.procs = _spawn_workers(cfg, n_workers, seed, self.envs_per_worker, local=True)
         n_params = 0
@@ -536,7 +531,7 @@ class LocalCollector(_WorkerPool):
             for e, p in self.pool.sampling_distribution():
                 entries.append(({"id": e["id"], "path": str(e["path"]), "elo": float(e["elo"])}, float(p)))
         return {"hist_prob": self.hist_prob if entries else 0.0, "entries": entries,
-                "nexto": dict(getattr(self, "nexto", None) or {})}
+                "sparring": {k: dict(v) for k, v in (getattr(self, "sparring", None) or {}).items()}}
 
     def _obs_buffer(self, rows: int) -> Optional[Tuple[str, int]]:
         """Tampon d'observations d'au moins `rows` lignes par worker (réalloué si le lot grandit)."""

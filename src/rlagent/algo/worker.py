@@ -42,13 +42,60 @@ class EpisodeStart:
     teacher: Optional[np.ndarray] = None
 
 
-# Action « jouée par Nexto » envoyée par le collecteur : −(1 + round(100 · beta)) ; le worker calcule les commandes.
+# Bots de sparring (selfplay.sparring) : l'ordre fixe le code d'action, identique dans tous les processus.
+SPARRING_BOTS = ("nexto", "galactus", "kira", "rain", "necto")
+
+
+# Action « jouée par un bot de sparring » envoyée par le collecteur : −(1 + 1000 · indice du bot + round(100 · beta)),
+# beta dans [0, 1] ; le worker calcule les commandes du bot. Nexto (indice 0) garde le code de la session 10.
+def bot_action_code(bot: str, beta: float) -> int:
+    return -(1 + 1000 * SPARRING_BOTS.index(bot) + int(round(100.0 * float(beta))))
+
+
+def bot_of_code(code: int):
+    v = -int(code) - 1
+    return SPARRING_BOTS[v // 1000], (v % 1000) / 100.0
+
+
 def nexto_action_code(beta: float) -> int:
-    return -(1 + int(round(100.0 * float(beta))))
+    return bot_action_code("nexto", beta)
 
 
 def nexto_beta_of(code: int) -> float:
-    return (-int(code) - 1) / 100.0
+    return bot_of_code(code)[1]
+
+
+def sparring_settings(cfg: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+    """`selfplay.sparring.bots` : {bot: {prob, beta_start}} -> {bot: {"prob", "beta"}} (bots à prob > 0 seulement).
+    L'ancienne clé `selfplay.nexto` (session 10) vaut un seul bot. train.py fait monter `beta` (vers l'argmax) quand on
+    prend assez de points au bot. Moteur factice des tests : aucun bot (pas d'arène)."""
+    sp = cfg.get("selfplay") or {}
+    if (cfg.get("env") or {}).get("engine", "rocketsim") == "fake":
+        return {}
+    bots = dict((sp.get("sparring") or {}).get("bots") or {})
+    if not bots and sp.get("nexto"):
+        bots = {"nexto": sp["nexto"]}
+    out = {}
+    for name, b in bots.items():
+        if name not in SPARRING_BOTS:
+            raise ValueError(f"selfplay.sparring : bot inconnu « {name} » ({', '.join(SPARRING_BOTS)})")
+        if float((b or {}).get("prob", 0.0)) > 0.0:
+            out[name] = {"prob": float(b["prob"]), "beta": float(b.get("beta_start", 1.0))}
+    return out
+
+
+def pick_sparring(sparring: Dict[str, Dict[str, float]], rng) -> Optional[str]:
+    """Bot de sparring de la prochaine partie (chacun avec sa part `prob` des épisodes), ou None (self-play)."""
+    u = rng.random()
+    for name, b in sparring.items():
+        u -= float(b["prob"])
+        if u < 0.0:
+            return name
+    return None
+
+
+def sparring_entry(name: str, sparring: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
+    return {"id": name, "kind": "bot", "bot": name, "beta": float(sparring[name].get("beta", 1.0)), "elo": 0.0}
 
 
 @dataclass
@@ -75,17 +122,18 @@ class EnvRunner:
         self.env = factory(cfg, seed=seed)
         self.tracker = EpisodeTracker(rc.get("double_commit_radius", 900), rc.get("double_commit_min_speed", 400),
                                       rewards_cfg=rc)
-        # Session 10 : Nexto comme adversaire (selfplay.nexto) et comme professeur (train.kickstart). Les commandes de
-        # Nexto (kickoff codé en dur : 8 lignes par step) passent par MixedRepeatAction, identique pour les indices.
+        # Bots de sparring (selfplay.sparring : Nexto, GalactusV2, Kira, Rain) et Nexto professeur (train.kickstart).
+        # Leurs commandes (8 lignes par step : kickoff codé en dur, délai d'action) passent par MixedRepeatAction,
+        # identique à RepeatAction pour nos indices.
         self.seed = seed
-        self.nexto_cfg = (cfg.get("selfplay") or {}).get("nexto") or {}
+        self.sparring = sparring_settings(cfg)
         self.kick_cfg = (cfg.get("train") or {}).get("kickstart") or {}
         if cfg["env"].get("engine", "rocketsim") == "fake":                # moteur factice des tests : pas d'arène
             self.kick_cfg = {}
-        self.nexto = None                      # adversaire Nexto (créé au 1er besoin)
+        self.bots: Dict[str, Any] = {}         # adversaires de sparring de cette arène (créés au 1er besoin)
         self.teacher_obs = None                # NextoObs du professeur (sans état : un seul par arène)
         self.rng = np.random.default_rng(seed + 104729)
-        if float(self.nexto_cfg.get("prob", 0.0)) > 0.0 and cfg["env"].get("engine", "rocketsim") != "fake":
+        if self.sparring:
             from ..opponents.necto import MixedRepeatAction
             self.env.action_parser = MixedRepeatAction(int(cfg["env"]["action_repeat"]))
         self.current = self.reset()
@@ -129,8 +177,8 @@ class EnvRunner:
         obs_dict = env.reset()
         agents = list(obs_dict.keys())
         self.tracker.reset(env.state, env.shared_info)
-        if self.nexto is not None:
-            self.nexto.on_reset(env.state)
+        for bot in self.bots.values():
+            bot.on_reset(env.state)
         return EpisodeStart(
             agents=agents,
             teams=np.array([env.state.cars[a].team_num for a in agents], dtype=np.int8),
@@ -138,22 +186,29 @@ class EnvRunner:
             teacher=self._teacher(agents),
         )
 
-    def _nexto_rows(self, agents: List[str], beta: float) -> Dict[str, np.ndarray]:
-        if self.nexto is None:
-            from ..opponents.nexto import NextoOpponent
-            self.nexto = NextoOpponent(beta=beta, seed=self.seed)
-            self.nexto.new_game(self._pads())
-            self.nexto.on_reset(self.env.state)
-        self.nexto.beta = float(beta)
-        return self.nexto.act(agents, self.env.state)
+    @property
+    def nexto(self):
+        return self.bots.get("nexto")
+
+    def _bot_rows(self, name: str, agents: List[str], beta: float) -> Dict[str, np.ndarray]:
+        bot = self.bots.get(name)
+        if bot is None:
+            from ..opponents.nexto import bot_from_spec
+            bot = self.bots[name] = bot_from_spec(name, seed=self.seed + 31 * SPARRING_BOTS.index(name))
+            bot.new_game(self._pads())
+            bot.on_reset(self.env.state)
+        bot.beta = float(beta)
+        return bot.act(agents, self.env.state)
 
     def step(self, actions: np.ndarray) -> StepResult:
         env, current = self.env, self.current
         action_dict = {a: np.array([int(actions[i])], dtype=np.int64) for i, a in enumerate(current.agents)}
-        nexto_agents = [a for i, a in enumerate(current.agents) if int(actions[i]) < 0]
-        if nexto_agents:
-            beta = nexto_beta_of(int(actions[current.agents.index(nexto_agents[0])]))
-            action_dict.update(self._nexto_rows(nexto_agents, beta))
+        by_bot: Dict[Any, List[str]] = {}
+        for i, a in enumerate(current.agents):
+            if int(actions[i]) < 0:
+                by_bot.setdefault(bot_of_code(int(actions[i])), []).append(a)
+        for (name, beta), agents in by_bot.items():
+            action_dict.update(self._bot_rows(name, agents, beta))
         obs_dict, rew_dict, term_dict, trunc_dict = env.step(action_dict)
         self.tracker.step(env.state)
         rewards = np.array([rew_dict[a] for a in current.agents], dtype=np.float32)
@@ -225,10 +280,11 @@ class LocalPolicy:
     def new_slot(self, start: EpisodeStart):
         from .collector import EnvSlot
         slot = EnvSlot(episode=start)
-        nx = self.hist.get("nexto") or {}
-        if float(nx.get("prob", 0.0)) > 0.0 and self.rng.random() < float(nx["prob"]):
+        sparring = self.hist.get("sparring") or {}
+        bot = pick_sparring(sparring, self.rng) if sparring else None
+        if bot is not None:
             slot.hist_team = self.rng.choice([0, 1])
-            slot.hist_entry = {"id": "nexto", "kind": "nexto", "beta": float(nx.get("beta", 1.0)), "elo": 0.0}
+            slot.hist_entry = sparring_entry(bot, sparring)
             return slot
         entries = self.hist["entries"]
         # même tirage que le collecteur central (Collector._new_slot) avec la loi de tirage du pool
@@ -244,7 +300,8 @@ class LocalPolicy:
         key = entry["id"]
         actor = self._hist_actors.get(key)
         if actor is None:
-            data = torch.load(entry["path"], map_location="cpu", weights_only=False)
+            from ..selfplay.pool import version_path
+            data = torch.load(version_path(entry["path"]), map_location="cpu", weights_only=False)
             actor = actor_from_model_cfg(data["model_cfg"], self.n_actions)
             actor.load_state_dict(data["actor"])
             actor.eval()

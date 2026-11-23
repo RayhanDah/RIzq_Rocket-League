@@ -14,7 +14,9 @@ train:
   # choisirait (argmax de sa politique, même table de 90 actions que nous) pour 25 % des voitures et des steps ; le
   # learner ajoute coef × entropie croisée vers cette action, coef de 0,5 à la reprise (27,45 G) jusqu'à 0 en 1,5 G steps.
   # Coût mesuré : 0,6 ms par étiquette (CPU, 1 thread), ~10-15 % de débit pendant la phase d'imitation.
-  kickstart: {enabled: true, begin: 27_450_134_560, steps: 1_500_000_000, coef: 0.5, frac: 0.25}
+  # Session 11 (23/11, décision PO) : coupée. En session 10, l'Elo a chuté de ~350 en 13 M steps (écart −353 contre
+  # v25785) pendant que l'accord avec Nexto montait (27 → 35 %) : l'entropie croisée (0,5 × ~2,5) écrasait la perte PPO.
+  kickstart: {enabled: false, begin: 27_450_134_560, steps: 1_500_000_000, coef: 0.5, frac: 0.25}
   # Session 5 (08/11) : la session 4 a dérivé à partir de 8,7 G (jonglage payé par aerial_touch). On repart de v8400,
   # la meilleure version mesurée ; les versions plus récentes quittent le pool (pool/rejected/). Une seule fois par run
   # et par version (guard.json, manual_rollbacks).
@@ -346,10 +348,25 @@ curriculum:
       blend_steps: 200_000_000
 selfplay:
   hist_prob: 0.25
-  # Session 10 (22/11, décision PO) : Nexto en sparring pour 10 % des épisodes (pas Necto : plus d'adversité utile en
-  # simulation). Il joue d'abord échantillonné (beta 0,5, plus faible), puis en argmax quand notre score moyen contre
-  # lui atteint 0,3 sur ses 300 derniers épisodes. Ses parties ne comptent ni pour l'Elo ni pour le classement (vs_nexto/*).
-  nexto: {prob: 0.10, beta_start: 0.5, promote_score: 0.3, promote_window: 300}
+  # Sparring contre des bots externes (selfplay.sparring, algo/worker.py). Session 10 (22/11) : Nexto seul, 10 %.
+  # Session 11 (23/11, décision PO) : quatre bots, chacun avec sa part des épisodes (`prob`) et son beta de départ
+  # (1 = argmax comme en match, 0,5 = échantillonné, plus bas = plus faible). Le beta d'un bot monte de `promote_step`
+  # dès que notre score moyen contre lui atteint `promote_score` sur ses `promote_window` derniers épisodes (gardé dans
+  # le checkpoint). Ces parties ne comptent ni pour l'Elo ni pour le classement (vs_<bot>/*).
+  # Betas de départ calibrés le 23/11 (v25785 échantillonné, 24 matchs par bot, part de nos buts) : nexto 0,5 → 19 % ;
+  # galactus 0,5 → 8 %, 0,3 → 26 % ; kira 0,5 → 11 %, 0,3 → 38 % ; rain 0,5 → 54 % (en argmax, les trois GigaLearn nous
+  # battent 24-0). On part donc là où l'on marque 20-50 % des buts, puis le beta monte de 0,1 à chaque palier franchi.
+  # Parts : GalactusV2 (le plus fort, 1542 de MMR bot) et Kira en tête. Coût mesuré : un step contre un bot coûte
+  # 4,8-7,4 ms au lieu de 1,8 ms (portable, 1 thread) → ~+30 % de temps de simulation pour 14 % des parties.
+  sparring:
+    promote_window: 300
+    promote_score: 0.35
+    promote_step: 0.1
+    bots:
+      galactus: {prob: 0.04, beta_start: 0.3}
+      kira: {prob: 0.04, beta_start: 0.3}
+      nexto: {prob: 0.03, beta_start: 0.5}
+      rain: {prob: 0.03, beta_start: 0.5}
   pool_every_steps: 5_000_000
   pool_recent: 20
   pfsp: true                       # (1 − p)² : les ancres déjà battues ne coûtent presque plus de parties

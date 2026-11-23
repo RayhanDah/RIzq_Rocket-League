@@ -77,6 +77,19 @@ echo "[cloud] meshes : $MESHES_DIR ($(ls "$MESHES_DIR/soccar" | wc -l) fichiers)
 # Session 10 : modèle de Nexto (sparring et imitation), déposé dans le dataset privé rl-agent-opponents
 NEXTO_MODEL=$(find /kaggle/input -maxdepth 6 -name nexto-model.pt 2>/dev/null | head -1 || true)
 if [ -n "$NEXTO_MODEL" ]; then export RLAGENT_NEXTO_MODEL="$NEXTO_MODEL"; echo "[cloud] Nexto : $NEXTO_MODEL"; fi
+# Sparring à plusieurs bots : GalactusV2, Kira, Rain (fichiers .lt, même arborescence que dist/opponents), déposés en
+# archive opponents-bots.zip dans le même dataset. Kaggle peut l'avoir déjà décompressée : on cherche les deux formes.
+BOTS_ZIP=$(find /kaggle/input -maxdepth 6 -name opponents-bots.zip 2>/dev/null | head -1 || true)
+if [ -n "$BOTS_ZIP" ]; then
+  mkdir -p /tmp/opponents && "$PY" -m zipfile -e "$BOTS_ZIP" /tmp/opponents && BOTS_ROOT=/tmp/opponents
+else
+  KIRA_POLICY=$(find /kaggle/input -maxdepth 8 -path '*Kira/rlbot/POLICY.lt' 2>/dev/null | head -1 || true)
+  [ -n "$KIRA_POLICY" ] && BOTS_ROOT=$(dirname "$(dirname "$(dirname "$KIRA_POLICY")")")
+fi
+if [ -n "${BOTS_ROOT:-}" ]; then
+  export RLAGENT_GALACTUS_DIR="$BOTS_ROOT/GalactusV2/rlbot" RLAGENT_KIRA_DIR="$BOTS_ROOT" RLAGENT_RAIN_DIR="$BOTS_ROOT"
+  echo "[cloud] bots de sparring : $BOTS_ROOT ($(find "$BOTS_ROOT" -name '*.lt' | wc -l) fichiers .lt)"
+fi
 
 # 3) Accélérateur utilisable ? (vrai calcul, pas seulement la détection). P100 : plus gérée par les PyTorch récents.
 DEVICE=$("$PY" - <<'PYEOF'
