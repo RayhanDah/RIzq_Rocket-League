@@ -37,6 +37,18 @@ PFSP_PRIOR = 2.0         # pseudo-épisodes à 0,5 : une version jamais jouée a
 STATS_FILE = "pfsp_stats.json"
 
 
+def version_path(path: Union[str, Path]) -> Path:
+    """Fichier d'une version du pool. Un retour en arrière (`reject_after`) range les versions récentes dans
+    pool/rejected/ pendant qu'une collecte en cours peut encore jouer contre elles (session 10 : FileNotFoundError dans
+    un worker, run arrêté) : on les y retrouve."""
+    p = Path(path)
+    if not p.exists():
+        alt = p.parent / "rejected" / p.name
+        if alt.exists():
+            return alt
+    return p
+
+
 def elo_expected(r_a: float, r_b: float) -> float:
     return 1.0 / (1.0 + 10 ** ((r_b - r_a) / 400.0))
 
@@ -319,7 +331,7 @@ class OpponentPool:
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
-        data = torch.load(entry["path"], map_location="cpu", weights_only=False)
+        data = torch.load(version_path(entry["path"]), map_location="cpu", weights_only=False)
         actor = build_fn(data["model_cfg"])
         actor.load_state_dict(data["actor"])
         actor.eval()
