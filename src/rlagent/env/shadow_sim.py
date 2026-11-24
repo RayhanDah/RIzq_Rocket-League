@@ -99,6 +99,12 @@ class ShadowSim:
             self.prev_pos[p.player_id] = pos
             if p.player_id in stepping and not moved:
                 out[p.player_id] = st
+            elif not active and p.demolished_timeout == -1:
+                # Compte à rebours (et buts, replays) : voiture immobile, compteurs à zéro comme au reset de
+                # l'entraînement. Sans ça, la 1re décision du kickoff (prise pendant le compte à rebours) voyait les
+                # valeurs périmées de rlgym_compat : jump_time 1 et is_boosting hérités d'avant le but (diagnostic
+                # du 25/11 : 5 kickoffs sur 9).
+                out[p.player_id] = st
         return out
 
 

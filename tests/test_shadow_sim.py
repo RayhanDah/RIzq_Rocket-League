@@ -86,3 +86,27 @@ def test_patch_overrides_only_the_three_counters():
     car.air_time_since_jump, p.dodge_timeout = 0.2, 1.05        # le paquet donne la valeur exacte : on la garde
     patch_compat_cars(NS(cars={3: car}), NS(players=[p]), {3: st})
     assert car.air_time_since_jump == 0.2
+
+
+def test_countdown_resets_counters_like_a_training_reset():
+    """1re décision du kickoff, prise pendant le compte à rebours : compteurs à zéro (diagnostic du 25/11)."""
+    arena = rs.Arena(rs.GameMode.SOCCAR)
+    arena.set_car_ball_collision(False)
+    ref = arena.add_car(0, rs.CarConfig.OCTANE)
+    shadow, frame = ShadowSim(), 100
+    jump = rs.CarControls(throttle=1.0, jump=True, boost=True)
+    ref.set_controls(jump)
+    for _ in range(20):                                       # en l'air, boost : compteurs non nuls
+        arena.step(1)
+        frame += 1
+        shadow.update(packet(frame, ref, jump, 50.0))
+    st = ref.get_state()                                      # remise en place pour le kickoff, puis compte à rebours
+    st.pos, st.vel, st.ang_vel = rs.Vec(0.0, -4608.0, 17.0), rs.Vec(0, 0, 0), rs.Vec(0, 0, 0)
+    ref.set_state(st)
+    countdown = packet(frame + 400, ref, rs.CarControls(), 33.3)
+    countdown.match_info.match_phase = 1
+    got = shadow.update(countdown).get(7)
+    assert got is not None and got.jump_time == 0.0 and got.time_spent_boosting == 0.0
+    car = NS(jump_time=1.0, air_time_since_jump=0.4, boost_active_time=0.5)   # valeurs périmées de rlgym_compat
+    patch_compat_cars(NS(cars={7: car}), countdown, {7: got})
+    assert (car.jump_time, car.air_time_since_jump, car.boost_active_time) == (0.0, 0.0, 0.0)
