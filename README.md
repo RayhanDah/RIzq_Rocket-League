@@ -7,19 +7,21 @@ lui-même dans **RocketSim** (la physique de Rocket League, sans graphismes et b
 
 ## Résultats
 
-État au 22/11/2026, version **v25785**.
+État au 24/11/2026, version **v30160** (le bot fourni dans `bot/model.pt`).
 
 **Dans le vrai jeu** (RLBot, matchs de 5 minutes, 120 FPS) :
 
 | Adversaire | Résultat |
 |---|---|
-| Necto (bot RL de référence de la communauté RLBot) | 3 victoires sur 3 : 6-4, 8-7 en prolongation, 9-4 |
+| Necto (bot RL de référence de la communauté RLBot) | 2 victoires sur 2 : 12-2, 8-4 |
+| v25785 (version précédente du bot) | 3 victoires, 1 défaite : 6-4, 3-6, 5-4, 5-4 |
 | Psyonix All-Star (meilleure IA du jeu de base) | battu par toutes nos versions testées depuis novembre (jusqu'à 15-3) |
-| Nexto (successeur de Necto) | défaite 2-15 : c'est le prochain objectif |
+| Nexto (successeur de Necto) | 2 défaites : 3-13, 3-15. C'est le prochain objectif |
 
-**En simulation** (100 matchs 1v1 contre Necto) : 97 victoires, 1 nul, 2 défaites.
+**En simulation** (24 matchs 1v1) : 24 victoires sur 24 contre Necto (82 % des buts) ; contre Nexto, 7 victoires,
+1 nul, 16 défaites (40 % des buts, contre 20 % pour la version précédente).
 
-Entraînement : plus de **27 milliards de steps** de jeu simulé, jusqu'à **~165 000 steps/s** sur Kaggle (TPU v5e-8,
+Entraînement : plus de **30 milliards de steps** de jeu simulé, jusqu'à **~165 000 steps/s** sur Kaggle (TPU v5e-8,
 224 cœurs CPU pour la simulation).
 
 ---
@@ -122,12 +124,12 @@ Les collision meshes ne sont pas fournis : chacun les extrait de son propre jeu 
 ├── configs/          default.yaml, profils machine (laptop, kaggle…) et profils de run (s2 → s10)
 ├── scripts/          benchmarks, évaluation, audits de style, visualisation, export du bot, préparation cloud
 ├── cloud/            notebooks Kaggle / Colab et synchronisation
-├── bot/              bot RLBot v5, poids de v25785 (model.pt) et configurations de matchs
+├── bot/              bot RLBot v5, poids de v30160 (model.pt) et configurations de matchs
 ├── tests/
 └── docs/             architecture, sprint 1, notes de conception des runs
 ```
 
-Le bot fourni (`bot/model.pt`) est la version v25785. Non versionnés : `collision_meshes/` et `runs/` (checkpoints,
+Le bot fourni (`bot/model.pt`) est la version v30160. Non versionnés : `collision_meshes/` et `runs/` (checkpoints,
 pool, métriques).
 
 ---
@@ -141,7 +143,8 @@ pool, métriques).
 | s7-s9 | refonte des récompenses, réglage de l'optimiseur | ne battent jamais s6 |
 | **s10** | de zéro : PPO + MLP + curriculum par paliers + Elo absolu | bat s6 38-1-1 dès la 1re session |
 | s10, sessions 2-9 | nouveaux paliers (précision, kickoffs, démos, aériennes, duels, arrêts…) | premières victoires contre Necto dans le vrai jeu (17/11), puis 3-0 avec v25785 |
-| s10, session 10 | sparring contre Nexto | en cours |
+| s10, session 10 | sparring contre Nexto et imitation de Nexto | l'imitation fait chuter le bot : abandonnée |
+| s10, session 11 | sparring contre quatre bots (Nexto, GalactusV2, Kira, Rain) | v30160 bat v25785 3-1 et Necto 2-0 dans le vrai jeu |
 
 Le détail de chaque session est dans [`docs/REFONTE_S10.md`](docs/REFONTE_S10.md).
 
