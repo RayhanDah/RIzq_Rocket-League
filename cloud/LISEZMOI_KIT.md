@@ -71,10 +71,13 @@ reprise du run précédent : .../runs/{RUN}
 [cloud] Nexto : /kaggle/input/.../nexto-model.pt
 [cloud] bots de sparring : ... (10 fichiers .lt)
 [train] reprise depuis {LATEST} (step {STEP})
-[train] sparring : galactus 4% (beta ...), kira 4% (beta ...), nexto 3% (beta ...), rain 3% (beta ...) ; 14% des épisodes
+{SPARRING}
 [train] curriculum : palier ...
 it ... | steps ... | sps ...
 ```
+
+Les lignes `[train] sparring : ... reprend à beta ...` qui peuvent suivre sont normales : le run garde le niveau
+déjà atteint contre chaque bot.
 
 Ensuite, une ligne `it ... | steps ... | sps ...` toutes les 10 itérations. En TPU, `sps` doit être autour de
 100 000 à 170 000.

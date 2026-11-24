@@ -80,6 +80,11 @@ def main() -> None:
     nb_name = f"rl-agent-{run.name}.ipynb"
     notebook(run.name, args.profiles, out / nb_name)
 
+    from rlagent.algo.worker import sparring_settings
+    from rlagent.config import load_config
+    sp = sparring_settings(load_config(["kaggle_tpu"] + args.profiles.split()))
+    sparring = ("[train] sparring : " + ", ".join(f"{n} {b['prob']:.0%} (beta {b['beta']:g})" for n, b in sp.items())
+                + f" ; {sum(b['prob'] for b in sp.values()):.0%} des épisodes") if sp else "(pas de sparring)"
     tpl = (ROOT / "cloud" / "LISEZMOI_KIT.md").read_text(encoding="utf-8")
     text = (tpl.replace("{RUN}", run.name).replace("{PROFILES}", args.profiles).replace("{NOTEBOOK}", nb_name)
             .replace("{LATEST}", info["latest"]).replace("{STEP}", f"{info['step']:,}")
@@ -87,7 +92,8 @@ def main() -> None:
             .replace("{SIZE_MESHES}", mb(out / "datasets" / "rl-collision-meshes.zip"))
             .replace("{SIZE_OPP}", mb(out / "datasets" / "rl-agent-opponents"))
             .replace("{SIZE_RESUME}", mb(out / "datasets" / "rl-agent-resume.zip"))
-            .replace("{POOL}", str(info["pool"])).replace("{DATE}", f"{date.today():%d/%m/%Y}"))
+            .replace("{POOL}", str(info["pool"])).replace("{DATE}", f"{date.today():%d/%m/%Y}")
+            .replace("{SPARRING}", sparring))
     (out / "LISEZMOI.md").write_text(text, encoding="utf-8")
     print(f"[kit] {out} : reprise à {info['latest']} ({info['step']:,} steps), {info['n_files']} fichiers de run")
 
