@@ -81,11 +81,19 @@ class Tracer:
                             "demo": p.demolished_timeout,
                             "in": [li.throttle, li.steer, li.pitch, li.yaw, li.roll, li.jump, li.boost, li.handbrake]})
         cars = {str(c.team_num): [float(getattr(c, k)) for k in CAR_FLAGS] for c in state.cars.values()}
+        ball = packet.balls[0].physics if len(packet.balls) else None
         self.f.write(json.dumps({"f": packet.match_info.frame_num, "phase": int(packet.match_info.match_phase),
-                                 "p": players, "c": cars}) + "\n")
+                                 "p": players, "c": cars,
+                                 "b": None if ball is None else [_v(ball.location), _v(ball.velocity),
+                                                                 _v(ball.angular_velocity)]}) + "\n")
         self.n += 1
         if self.n % 240 == 0:
             self.f.flush()
+
+    def record_step(self, frame: int, obs: np.ndarray, action: np.ndarray) -> None:
+        """Une décision : observation vue par le réseau et action choisie (indice de la table de 90)."""
+        self.f.write(json.dumps({"step": int(frame), "a": int(np.asarray(action).reshape(-1)[0]),
+                                 "o": [round(float(x), 5) for x in np.asarray(obs).reshape(-1)]}) + "\n")
 
 
 class RLAgentBot(RLGymBot):
@@ -110,7 +118,7 @@ class RLAgentBot(RLGymBot):
         if os.environ.get("RLAGENT_NO_SHADOW") != "1":
             init_rocketsim(HERE.parent / "collision_meshes")
             shadow = ShadowSim()
-        tracer = Tracer(HERE / sys.argv[2]) if len(sys.argv) > 2 else None
+        tracer = self.tracer = Tracer(HERE / sys.argv[2]) if len(sys.argv) > 2 else None
         if shadow is None and tracer is None:
             return
         # GameState a des __slots__ : on enveloppe la méthode de la classe (ce processus seulement)
@@ -129,7 +137,10 @@ class RLAgentBot(RLGymBot):
         cls.update = wrapped
 
     def get_action(self, obs, game_state, packet):
-        return self.agent.act(obs)
+        action = self.agent.act(obs)
+        if getattr(self, "tracer", None) is not None:
+            self.tracer.record_step(packet.match_info.frame_num, obs, action)
+        return action
 
 
 if __name__ == "__main__":

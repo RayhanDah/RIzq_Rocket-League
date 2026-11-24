@@ -56,9 +56,11 @@ def load(path: Path):
     with open(path, encoding="utf-8") as f:
         for line in f:
             try:
-                rows.append(json.loads(line))
+                r = json.loads(line)
             except json.JSONDecodeError:
                 break                     # dernière ligne coupée (jeu fermé)
+            if "f" in r:                  # les lignes « step » (décisions du bot) sont lues par kickoff_check.py
+                rows.append(r)
     rows.sort(key=lambda r: r["f"])
     out, seen = [], set()
     for r in rows:                        # un paquet peut être vu deux fois : on garde le premier
