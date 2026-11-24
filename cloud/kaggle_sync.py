@@ -331,9 +331,14 @@ def cmd_launch(args) -> None:
     print(f"[kaggle] ensuite : python cloud/kaggle_sync.py fetch --run-name {args.run_name} --wait")
 
 
+def kernel_of(k, args) -> str:
+    """Notebook du run : le sien, ou celui d'un camarade (`--kernel <pseudo>/<notebook>`, partagé avec ce compte)."""
+    return args.kernel if getattr(args, "kernel", None) else kernel_ref(k, args.run_name)[1]
+
+
 def cmd_status(args) -> None:
     k = api()
-    _, ref = kernel_ref(k, args.run_name)
+    ref = kernel_of(k, args)
     status, msg = kernel_status(k, ref)
     print(f"{ref} : {status or 'inexistant'}" + (f" ({msg})" if msg else ""))
 
@@ -414,7 +419,7 @@ def move_tree(src: Path, target: Path) -> None:
 
 def cmd_fetch(args) -> None:
     k = api()
-    _, ref = kernel_ref(k, args.run_name)
+    ref = kernel_of(k, args)
     last = None
     while True:
         try:
@@ -497,6 +502,7 @@ def main() -> None:
 
     p = sub.add_parser("status", help="état de la dernière session du run")
     p.add_argument("--run-name", required=True)
+    p.add_argument("--kernel", default=None, help="notebook d'un autre compte : <pseudo>/<notebook> (partagé avec toi)")
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("fetch", help="télécharge l'Output et range runs/<run> sur le portable")
@@ -505,6 +511,7 @@ def main() -> None:
     p.add_argument("--poll", type=int, default=300, help="secondes entre deux vérifications (--wait)")
     p.add_argument("--force", action="store_true", help="écraser même si le run local est plus avancé")
     p.add_argument("--full-pool", action="store_true", help="tout le pool, pas seulement 1 version / 100 M + les 20 dernières")
+    p.add_argument("--kernel", default=None, help="notebook d'un autre compte : <pseudo>/<notebook> (partagé avec toi)")
     p.set_defaults(func=cmd_fetch)
 
     args = ap.parse_args()
