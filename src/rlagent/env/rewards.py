@@ -1233,6 +1233,159 @@ def linear_schedule(start: float, end: float, steps: float, t: float) -> float:
     return start + (end - start) * frac
 
 
+class KickoffFirstTouchTerm(RewardTerm, _KickoffPhase):
+    """Palier 21 (25/11, PO) : 1re touche du kickoff. +1, une fois par kickoff, à la voiture qui touche la balle la
+    première dans les `max_s` secondes, si sa touche ne renvoie pas la balle vers son propre but (vitesse de la balle
+    dans l'axe du terrain, perspective d'équipe, au moins −`max_back` uu/s). Deux camps au contact au même step (50/50) :
+    rien. Zéro-somme : l'adversaire perd ce que l'autre gagne.
+    Mesure du 24/11 : v30160 ne touche le premier que dans 0-4 % des kickoffs contre Necto et Nexto, en simulation comme
+    dans le vrai jeu ; kickoff_win (balle chez l'adversaire à 3 s) paie autant « attendre puis contrer » qu'un kickoff
+    gagné, et dans le vrai jeu les bots externes marquent sur kickoff."""
+    name = "kickoff_first"
+
+    def __init__(self, max_s: float = 3.0, max_back: float = 200.0):
+        self.max_s, self.max_back = float(max_s), float(max_back)
+
+    def reset(self, agents, state, shared_info):
+        self.reset_phase(state, shared_info)
+        self.done = not self.kickoff
+
+    def get(self, agents, state, shared_info):
+        if self.done:
+            return {a: 0.0 for a in agents}
+        if self.elapsed(state) > self.max_s or state.goal_scored:
+            self.done = True
+            return {a: 0.0 for a in agents}
+        touchers = [a for a, c in state.cars.items() if c.ball_touches > 0]
+        if not touchers:
+            return {a: 0.0 for a in agents}
+        self.done = True
+        if len({state.cars[a].team_num for a in touchers}) > 1:
+            return {a: 0.0 for a in agents}
+        vy = float(state.ball.linear_velocity[1])
+        return {a: 1.0 if a in touchers and vy * _team_sign(state.cars[a].team_num) >= -self.max_back else 0.0
+                for a in agents}
+
+
+class BigPadLowTerm(RewardTerm):
+    """Palier 23 (25/11, PO : il roule souvent à sec ; récompenser le boost sans freiner sa consommation). Gros pad pris
+    avec moins de `below` de boost : (below − boost avant) / below, donc 1 à sec, 0 à `below`. Ne pénalise jamais la
+    dépense (rien ne change tant qu'on ne ramasse pas). Une fois toutes les `cooldown_s` secondes au plus par voiture :
+    la boucle « brûler son boost puis reprendre un gros pad » rapporte au plus 6 / min × poids
+    (tests/test_paliers_21_25.py). Pas après une démo (la réapparition redonne 33 de boost)."""
+    name = "big_pad_low"
+
+    def __init__(self, below: float = 25.0, cooldown_s: float = 10.0, min_gain: float = 13.0):
+        self.below, self.cooldown_s, self.min_gain = float(below), float(cooldown_s), float(min_gain)
+        self.prev: Dict[str, float] = {}
+        self.demoed: Dict[str, bool] = {}
+        self.last: Dict[str, int] = {}
+
+    def reset(self, agents, state, shared_info):
+        self.prev = {a: float(state.cars[a].boost_amount) for a in agents}
+        self.demoed = {a: bool(state.cars[a].is_demoed) for a in agents}
+        self.last = {}
+
+    def get(self, agents, state, shared_info):
+        tick = int(getattr(state, "tick_count", 0) or 0)
+        out = {}
+        for a in agents:
+            car = state.cars[a]
+            b = float(car.boost_amount)
+            prev = self.prev.get(a, b)
+            was_demoed = self.demoed.get(a, False)
+            self.prev[a], self.demoed[a] = b, bool(car.is_demoed)
+            ready = tick - self.last.get(a, -10**9) >= self.cooldown_s * cv.TICKS_PER_SECOND
+            if b - prev > self.min_gain and prev < self.below and not car.is_demoed and not was_demoed and ready:
+                self.last[a] = tick
+                out[a] = (self.below - prev) / self.below
+            else:
+                out[a] = 0.0
+        return out
+
+
+class SlowTurnTerm(RewardTerm):
+    """Palier 25 (25/11, PO : il fait de longs demi-tours inutiles ; plus mobile, plus agile). −1 par seconde passée au
+    sol, à plus de `min_dist` de la balle, la balle dans le dos (angle entre l'avant de la voiture et la balle au-delà de
+    `min_angle_deg`) et à moins de `max_speed` uu/s vers l'avant : le demi-tour lent coûte, le demi-flip, le powerslide
+    ou une remise en route rapide coûtent peu. Pénalité seule : rien à accumuler. Hors zéro-somme (comme kickoff_stall)."""
+    name = "slow_turn"
+
+    def __init__(self, min_angle_deg: float = 110.0, max_speed: float = 800.0, min_dist: float = 700.0):
+        self.cos_max = math.cos(math.radians(float(min_angle_deg)))
+        self.max_speed, self.min_dist = float(max_speed), float(min_dist)
+        self.tick: Optional[int] = None
+
+    def reset(self, agents, state, shared_info):
+        self.tick = int(getattr(state, "tick_count", 0) or 0)
+
+    def get(self, agents, state, shared_info):
+        tick = int(getattr(state, "tick_count", 0) or 0)
+        dt = max(0, tick - (self.tick if self.tick is not None else tick)) / cv.TICKS_PER_SECOND
+        self.tick = tick
+        out = {}
+        for a in agents:
+            car = state.cars[a]
+            p = car.physics
+            rel = state.ball.position - p.position
+            dist = norm3(rel)
+            if not car.on_ground or car.is_demoed or dist < self.min_dist or dt <= 0.0:
+                out[a] = 0.0
+                continue
+            fwd = p.forward
+            behind = float(np.dot(fwd, rel)) / max(dist, 1e-6) < self.cos_max
+            slow = float(np.dot(fwd, p.linear_velocity)) < self.max_speed
+            out[a] = -dt if behind and slow else 0.0
+        return out
+
+
+class PowerslideTurnTerm(RewardTerm):
+    """Palier 25 (25/11, PO : le bot a extrêmement besoin des dérapages). Un dérapage (frein à main au sol à plus de
+    `min_speed` uu/s, au moins `min_s` secondes) est jugé quand il se termine : (cos final − cos initial) / 2 de l'angle
+    entre l'avant de la voiture et la balle, × min(1, vitesse finale / 1 000). Signé : déraper pour se détourner de la
+    balle coûte autant que déraper vers elle rapporte, tourner en rond ne rapporte rien. Seulement si la balle était à
+    90° ou plus au départ et à plus de `min_dist`. Au plus un dérapage payé toutes les `cooldown_s` secondes : la boucle
+    « se détourner sans frein, revenir en dérapant » rapporte au plus 60 / cooldown_s par minute × poids
+    (tests/test_paliers_21_25.py)."""
+    name = "powerslide"
+
+    def __init__(self, min_speed: float = 500.0, min_s: float = 0.1, min_dist: float = 1000.0, cooldown_s: float = 2.0):
+        self.min_speed, self.min_s, self.min_dist = float(min_speed), float(min_s), float(min_dist)
+        self.cooldown_s = float(cooldown_s)
+        self.slide: Dict[str, Tuple[int, float]] = {}
+        self.last: Dict[str, int] = {}
+
+    def reset(self, agents, state, shared_info):
+        self.slide, self.last = {}, {}
+
+    @staticmethod
+    def _facing(car, state) -> Tuple[float, float]:
+        p = car.physics
+        rel = state.ball.position - p.position
+        dist = norm3(rel)
+        return float(np.dot(p.forward, rel)) / max(dist, 1e-6), dist
+
+    def get(self, agents, state, shared_info):
+        tick = int(getattr(state, "tick_count", 0) or 0)
+        out = {}
+        for a in agents:
+            car = state.cars[a]
+            out[a] = 0.0
+            speed = norm3(car.physics.linear_velocity)
+            sliding = bool(car.handbrake > 0.5) and car.on_ground and not car.is_demoed and speed > self.min_speed
+            cos, dist = self._facing(car, state)
+            if sliding and a not in self.slide:
+                self.slide[a] = (tick, cos)
+            elif not sliding and a in self.slide:
+                start, cos0 = self.slide.pop(a)
+                long_enough = (tick - start) >= self.min_s * cv.TICKS_PER_SECOND
+                ready = tick - self.last.get(a, -10**9) >= self.cooldown_s * cv.TICKS_PER_SECOND
+                if long_enough and ready and cos0 <= 0.0 and dist > self.min_dist and not car.is_demoed:
+                    self.last[a] = tick
+                    out[a] = (cos - cos0) / 2.0 * min(1.0, speed / 1000.0)
+        return out
+
+
 class TeamReward(RewardFunction[str, GameState, float]):
     """`stage_weights` : poids possibles des paliers du curriculum (`curriculum.stages`, curriculum.py). Les termes
     utilisés par au moins un palier sont construits dès le départ ; les poids du moment arrivent par
@@ -1396,6 +1549,12 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         FastAerialTerm(min_z=rc.get("fast_aerial_min_z", 500.0), useful_speed=rc.get("aerial_useful_speed") or 1000.0,
                        floor=rc.get("flight_touch_floor", 0.25), fast_s=rc.get("fast_aerial_fast_s", 0.8),
                        slow_s=rc.get("fast_aerial_slow_s", 2.0)),
+        # paliers 21-25 (25/11/2026)
+        KickoffFirstTouchTerm(max_s=rc.get("kickoff_first_max_s", 3.0), max_back=rc.get("kickoff_first_max_back", 200.0)),
+        BigPadLowTerm(below=rc.get("big_pad_low_below", 25.0), cooldown_s=rc.get("big_pad_low_cooldown_s", 10.0)),
+        SlowTurnTerm(min_angle_deg=rc.get("slow_turn_min_angle_deg", 110.0),
+                     max_speed=rc.get("slow_turn_max_speed", 800.0), min_dist=rc.get("slow_turn_min_dist", 700.0)),
+        PowerslideTurnTerm(cooldown_s=rc.get("powerslide_cooldown_s", 2.0)),
     ]
     stages = (cfg.get("curriculum") or {}).get("stages") or []
     return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0),

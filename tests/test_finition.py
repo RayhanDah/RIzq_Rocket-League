@@ -277,7 +277,7 @@ def test_run_resumed_at_precision_moves_on_to_finition():
     assert msg and c.name == "finition"
     assert c.ppo_overrides()["ent_coef"] == 0.005 and c.ppo_overrides()["lr_actor"] == 1.0e-4
     start, end = c.weights(step), c.weights(step + int(c.blend_steps))
-    assert start["shot_threat"] == 0.0 and end["shot_threat"] == c.stage_weights[-1]["shot_threat"]
+    assert start["shot_threat"] == 0.0 and end["shot_threat"] == c.stage_weights[c.names.index("finition")]["shot_threat"]
 
 
 def test_ladder_metrics_use_last_rated_version_between_fits(tmp_path):

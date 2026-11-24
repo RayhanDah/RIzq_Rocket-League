@@ -62,7 +62,8 @@ def no_touch(s):
 # --------------------------------------------------------------------------- configuration
 def test_stages_follow_petits_pads_one_change_each(cfg):
     names = [s["name"] for s in cfg["curriculum"]["stages"]]
-    assert names[names.index("petits_pads"):] == ["petits_pads"] + NEW + NEXT
+    i = names.index("petits_pads")
+    assert names[i:i + 1 + len(NEW) + len(NEXT)] == ["petits_pads"] + NEW + NEXT
     w = weights(cfg)
     assert changed(w["petits_pads"], w["kickoff_dispute"]) == {"kickoff_stall"}
     assert changed(w["kickoff_dispute"], w["demo_but"]) == {"demo_goal"}
@@ -567,6 +568,8 @@ def test_guard_replayed_on_sessions_7_and_8_stays_quiet():
             step = r["global_step"]
             if step < 13.762e9:
                 continue
+            if step > 23.05e9:                     # sessions 7 et 8 seulement (la session 10 a dérivé pour de vrai)
+                break
             n += 1
             fired = g.update(r)
             assert fired is None, (step, fired)

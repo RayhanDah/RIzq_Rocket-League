@@ -50,10 +50,12 @@ train:
           # retour au poids de la session 8 (0).
           term_max_share: {kickoff_win: 0.05, kickoff_rush: 0.05, demo: 0.08, aerial_touch: 0.05, save: 0.05, bump: 0.05,
                            small_pad: 0.03, kickoff_stall: 0.03, demo_goal: 0.03, high_goal: 0.03, bump_goal: 0.03,
-                           wall_touch: 0.03, fast_aerial: 0.03},
+                           wall_touch: 0.03, fast_aerial: 0.03, kickoff_first: 0.03, big_pad_low: 0.03,
+                           slow_turn: 0.03, powerslide: 0.03},
           fallback_weights: {kickoff_win: 3.0, kickoff_rush: 0.05, demo: 5.3, aerial_touch: 1.0, bump: 1.3,
                              kickoff_stall: 0.0, demo_goal: 4.0, high_goal: 0.0, bump_goal: 0.0, wall_touch: 0.0,
-                             fast_aerial: 0.0},
+                             fast_aerial: 0.0, kickoff_first: 0.0, big_pad_low: 0.0, slow_turn: 0.0,
+                             powerslide: 0.0},
           reenable_terms: [aerial_touch]}
 env:
   # 1v1 uniquement : le match se joue en 1v1 (README) ; 2v2/3v3 plus tard. Les profils FUSIONNENT les dictionnaires :
@@ -112,7 +114,7 @@ rewards:
   # demo_goal, high_goal (20/11) : bonus de but, zéro-somme comme le but. kickoff_stall n'y est PAS : attendre coûte
   # aux deux camps (en zéro-somme, les deux pénalités s'annuleraient).
   zero_sum_terms: [goal, vel_ball_to_goal, demo, bump, aerial_touch, save, demo_goal, high_goal, bump_goal, wall_touch,
-                   fast_aerial]
+                   fast_aerial, kickoff_first]
   team_spirit: {start: 0.0, end: 0.0, steps: 1}
   anneal: null                     # aucune décroissance programmée en steps : c'est le curriculum qui décide
   vel_player_to_ball_signed: true
@@ -346,6 +348,50 @@ curriculum:
     - name: double_saut
       rewards: {fast_aerial: 1.0}
       blend_steps: 200_000_000
+      # Session 12 : déjà 1,1 G steps à ce palier (29,05 → 30,16 G) ; passe au palier 21 dès la reprise.
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0030160068410: -25}
+    # Paliers 21-25 (25/11, décision PO après la série du 24/11 et le diagnostic des kickoffs). Même méthode : un
+    # changement par palier, 200 M steps de transition, 500 M au moins, passage sans régression face à v30160 (le bot
+    # actuel, ancre), plafond de 3 % du signal pour chaque nouveau terme (retour à 0 s'il dérive).
+    # Palier 21 : la 1re touche du kickoff. +2 (10 % d'un but), une fois par kickoff, à celui qui touche le premier sans
+    # renvoyer la balle vers son but ; zéro-somme. v30160 : 0-4 % de 1res touches contre Necto et Nexto (sim et réel).
+    - name: kickoff_gagne
+      rewards: {kickoff_first: 2.0}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0030160068410: -25}
+    # Palier 22 (PO : garder bumps et démos et les augmenter, il rate des buts tout faits) : demo 8 → 10, bump 1,8 → 2,5,
+    # bump puis but 3 → 4,5 (avec high_goal, les bonus de but restent sous un demi-but). Tous zéro-somme.
+    - name: contacts
+      rewards: {demo: 10.0, bump: 2.5, bump_goal: 4.5}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0030160068410: -25}
+    # Palier 23 (PO : boost moyen 31 contre 44 pour Nexto, sous 10 de boost 38 % du temps ; sans freiner la dépense) :
+    # gros pad pris avec moins de 25 de boost, 0 à 1 selon le manque, une fois par 10 s au plus. 0,5 : 6 / min × 0,5 = 3
+    # au plus par minute (15 % d'un but). La dépense n'est pas touchée (boost_spend inchangé, vol gratuit).
+    - name: boost
+      rewards: {big_pad_low: 0.5}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0030160068410: -25}
+    # Palier 24 (tir cadré : 1,7 / min contre 2,8 pour Nexto, 0,87 but / min contre 1,31) : shot_threat 3 → 5, la balle
+    # cadrée vers le but adverse vaut plus (potentiel : rien à accumuler).
+    - name: tir_cadre
+      rewards: {shot_threat: 5.0}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0030160068410: -25}
+    # Palier 25 (PO : plus mobile, moins de longs demi-tours, et des dérapages) : slow_turn −0,3 par seconde au sol,
+    # balle dans le dos à plus de 700 uu, à moins de 800 uu/s vers l'avant (un demi-tour lent de 1,5 s coûte ~0,45,
+    # 2 % d'un but ; pénalité seule). powerslide 0,1 : un dérapage qui remet la balle de côté (90°) à face en gardant sa
+    # vitesse vaut 0,05, de dos (180°) à face 0,1 ; signé, un toutes les 2 s au plus : la boucle « se détourner, revenir
+    # en dérapant » rapporte au plus 30 × 0,1 = 3 par minute (15 % d'un but, cf. test). Les deux termes ensemble : un
+    # seul changement de jeu (tourner vite).
+    - name: mobilite
+      rewards: {slow_turn: 0.3, powerslide: 0.1}
+      blend_steps: 200_000_000
 selfplay:
   hist_prob: 0.25
   # Sparring contre des bots externes (selfplay.sparring, algo/worker.py). Session 10 (22/11) : Nexto seul, 10 %.
@@ -362,11 +408,14 @@ selfplay:
     promote_window: 300
     promote_score: 0.35
     promote_step: 0.1
+    # Session 12 (PO, 25/11) : Nexto 4 % (beta repris du checkpoint, 0,9) ; les trois GigaLearn à 1 %, seuil de montée
+    # 0,25 (bloqués à ~22 % de victoires sous 0,35 en session 11). Sparring 7 % au lieu de 14 % : moins de coût (−27 %
+    # de débit en session 11) pour le self-play.
     bots:
-      galactus: {prob: 0.04, beta_start: 0.3}
-      kira: {prob: 0.04, beta_start: 0.3}
-      nexto: {prob: 0.03, beta_start: 0.5}
-      rain: {prob: 0.03, beta_start: 0.5}
+      galactus: {prob: 0.01, beta_start: 0.3, promote_score: 0.25}
+      kira: {prob: 0.01, beta_start: 0.3, promote_score: 0.25}
+      nexto: {prob: 0.04, beta_start: 0.5}
+      rain: {prob: 0.01, beta_start: 0.5, promote_score: 0.25}
   pool_every_steps: 5_000_000
   pool_recent: 20
   pfsp: true                       # (1 − p)² : les ancres déjà battues ne coûtent presque plus de parties
@@ -386,5 +435,5 @@ selfplay:
   anchors: [runs/s6_spo_kaggle, pool/actor_0005315235148.pt, pool/actor_0006800183709.pt, pool/actor_0007000329112.pt,
             pool/actor_0007565061406.pt, pool/actor_0008100114172.pt, pool/actor_0008400059217.pt,
             pool/actor_0013535043833.pt, pool/actor_0013600266923.pt, pool/actor_0013720292116.pt,
-            pool/actor_0018160005774.pt, checkpoints/ckpt_0023037887394.pt, pool/actor_0025785348226.pt]
+            pool/actor_0018160005774.pt, checkpoints/ckpt_0023037887394.pt, pool/actor_0025785348226.pt, pool/actor_0030160068410.pt]
   anchor_prob: 0.5                 # 12,5 % des épisodes

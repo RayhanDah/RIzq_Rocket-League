@@ -27,7 +27,7 @@ def test_profile_spars_against_four_bots_without_imitation(cfg):
     sp = sparring_settings(cfg)
     assert set(sp) == {"nexto", "galactus", "kira", "rain"}
     assert all(0.0 < b["prob"] and 0.0 < b["beta"] <= 1.0 for b in sp.values())
-    assert 0.10 <= sum(b["prob"] for b in sp.values()) <= 0.25        # le self-play reste l'essentiel
+    assert 0.05 <= sum(b["prob"] for b in sp.values()) <= 0.25        # le self-play reste l'essentiel
     assert not cfg["train"]["kickstart"]["enabled"]
     assert "nexto" not in cfg["selfplay"] or not cfg["selfplay"]["nexto"]
     assert sparring_settings({**cfg, "env": {**cfg["env"], "engine": "fake"}}) == {}

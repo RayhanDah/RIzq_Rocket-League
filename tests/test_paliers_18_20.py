@@ -39,7 +39,8 @@ def weights(cfg):
 # --------------------------------------------------------------------------- configuration
 def test_new_stages_one_change_each_after_but_haut(cfg):
     names = [s["name"] for s in cfg["curriculum"]["stages"]]
-    assert names[names.index("but_haut"):] == ["but_haut"] + NEXT
+    i = names.index("but_haut")
+    assert names[i:i + 1 + len(NEXT)] == ["but_haut"] + NEXT
     w = weights(cfg)
     chg = lambda a, b: {k for k in set(a) | set(b) if a.get(k, 0.0) != b.get(k, 0.0)}
     assert chg(w["but_haut"], w["bump_but"]) == {"bump_goal"}

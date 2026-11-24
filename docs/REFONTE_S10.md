@@ -924,3 +924,44 @@ Tests : `tests/test_sparring.py`.
   Nexto, 2-7 % contre les GigaLearn).
 - Contre Necto (sim) : au moins 75 % des buts ; écart contre v25785 positif sur l'échelle.
 - Vrai jeu : BO3 gagnés contre v25785 et contre Necto.
+
+### Résultat de la session 11 (Kaggle version 12, 23-24/11/2026)
+- 27,51 → 30,16 G steps, paliers 18-20 franchis (bump_but à 27,54 G, murs à 28,54 G, double_saut à 29,05 G), aucun
+  déclenchement du garde-fou.
+- Débit ~120 000 steps/s au lieu de ~165 000 (−27 %) : coût du sparring.
+- Contre les bots à leur beta du moment, 22-28 % de victoires. Le beta de Nexto monte de 0,5 à 0,9 ; ceux de Galactus
+  (0,4), Kira (0,5) et Rain (0,8) restent bloqués dès 27,6 G.
+- Vrai jeu (série du 24/11, `runs/s10_ppo_kaggle/real_2026-11-24/RECAP.md`) : **v30160** bat v25785 3-1, v28520 2-0 et
+  Necto 2-0 ; Nexto reste au-dessus. v28520, en tête de l'échelle, perd 0-3 contre v25785. v30160 devient le bot.
+
+### Diagnostic des kickoffs (25/11)
+Match tracé v30160 – Necto, puis chaque kickoff rejoué dans RocketSim depuis le même placement
+(`scripts/kickoff_check.py`) :
+- la 1re touche est la même dans les 9 cas (Necto, à 0,05 s près) : la physique du kickoff est fidèle, et notre bot ne
+  dispute jamais la 1re touche (0/9 en réel comme en simulation) ;
+- un bug : la 1re décision du kickoff est prise pendant le compte à rebours, quand la copie RocketSim du bot ne
+  renvoyait rien. Le réseau voyait les valeurs périmées de rlgym_compat (`jump_time` à 1 dans 4 kickoffs sur 9,
+  `is_boosting` adverse dans 2). Corrigé dans `env/shadow_sim.py` : avec ces champs à zéro, les 9 premières décisions
+  réelles sont celles de la simulation ;
+- ensuite, les deux mondes divergent en 1 à 2 s : petits écarts amplifiés au contact, c'est attendu.
+
+## 18. Session 12 : paliers 21-25, sparring réduit (25/11/2026)
+Décisions du PO après la série du 24/11 :
+
+| Palier | Changement | Faiblesse visée |
+|---|---|---|
+| 21 kickoff_gagne | `kickoff_first` 0 → 2 : +1 une fois par kickoff à la 1re touche, si elle n'envoie pas la balle vers son but ; zéro-somme | 0-4 % de 1res touches contre Necto et Nexto |
+| 22 contacts | `demo` 8 → 10, `bump` 1,8 → 2,5, `bump_goal` 3 → 4,5 | bumps et démos pas utilisés quand ils donnent un but tout fait |
+| 23 boost | `big_pad_low` 0 → 0,5 : gros pad pris sous 25 de boost, (25 − boost) / 25, une fois par 10 s au plus | boost moyen 31 contre 44 pour Nexto ; la dépense n'est pas touchée |
+| 24 tir_cadre | `shot_threat` 3 → 5 | 1,7 tir cadré / min contre 2,8 |
+| 25 mobilite | `slow_turn` 0 → 0,3 (−1 par seconde de demi-tour lent au sol, balle dans le dos) et `powerslide` 0 → 0,1 (dérapage signé selon qu'il remet la balle devant) | longs demi-tours, pas de dérapages |
+
+- Même méthode que les paliers 15-20 : 200 M steps de transition, 500 M au moins, passage sans régression face à
+  v30160 (nouvelle ancre, écart ≥ −25), plafond de 3 % du signal pour chaque nouveau terme (retour à 0 s'il dérive).
+- Boucles bornées (`tests/test_paliers_21_25.py`) : gros pad ≤ 6 / min, dérapages ≤ 3 / min à leur poids.
+- Part du signal mesurée en auto-jeu (v30160, poids du palier 25, 120 k steps) : `kickoff_first` 0,29 %,
+  `big_pad_low` 0,33 %, `slow_turn` 0,05 %, `powerslide` 0,01 % (v30160 ne dérape presque jamais). Poids gardés tels
+  quels (PO) ; à relever si la mobilité ne bouge pas.
+- Sparring : Nexto 4 %, Galactus, Kira et Rain 1 % chacun avec un seuil de montée de 0,25 ; 7 % des épisodes au lieu de 14 %.
+- La session est lancée par un camarade sur son compte Kaggle : `scripts/make_kaggle_kit.py`, instructions dans
+  `cloud/LISEZMOI_KIT.md`.
