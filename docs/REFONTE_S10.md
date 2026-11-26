@@ -931,7 +931,7 @@ Tests : `tests/test_sparring.py`.
 - Débit ~120 000 steps/s au lieu de ~165 000 (−27 %) : coût du sparring.
 - Contre les bots à leur beta du moment, 22-28 % de victoires. Le beta de Nexto monte de 0,5 à 0,9 ; ceux de Galactus
   (0,4), Kira (0,5) et Rain (0,8) restent bloqués dès 27,6 G.
-- Vrai jeu (série du 24/11, `runs/s10_ppo_kaggle/real_2026-11-24/RECAP.md`) : **v30160** bat v25785 3-1, v28520 2-0 et
+- Vrai jeu (série du 24/11, `runs/s10_ppo_kaggle_s11/real_2026-11-24/RECAP.md`) : **v30160** bat v25785 3-1, v28520 2-0 et
   Necto 2-0 ; Nexto reste au-dessus. v28520, en tête de l'échelle, perd 0-3 contre v25785. v30160 devient le bot.
 
 ### Diagnostic des kickoffs (25/11)
@@ -965,3 +965,16 @@ Décisions du PO après la série du 24/11 :
 - Sparring : Nexto 4 %, Galactus, Kira et Rain 1 % chacun avec un seuil de montée de 0,25 ; 7 % des épisodes au lieu de 14 %.
 - La session est lancée par un camarade sur son compte Kaggle : `scripts/make_kaggle_kit.py`, instructions dans
   `cloud/LISEZMOI_KIT.md`.
+
+### Résultat de la session 12 (Kaggle TPU, récupérée le 26/11/2026)
+- 30,16 → 33,88 G steps, ~165 000 steps/s, aucun retour en arrière du garde-fou. Paliers franchis : double_saut
+  (30,17 G), kickoff_gagne (30,68), contacts (31,19), boost (31,70), tir_cadre (32,20) ; mobilite jusqu'à la fin.
+- Échelle : meilleure version v31190 (1043), v33510 (1040) ; v30160 à 969. Écart face à v30160 de +47 en fin de run.
+- Auto-jeu : kickoffs bloqués 26 % → 4-5 %, 1re touche 2,84 → 2,49 s, buts après démo +14 %, tirs hors cadre −6 %.
+  Inchangés : bumps, ramassages de boost, temps sous 10 de boost, vitesse. `slow_turn` (0,05 % du signal) et
+  `powerslide` (0,01 %) sont trop faibles pour agir. Sparring : taux de victoire plat sur tout le run (Nexto ~30 %).
+- Simulation (24 matchs, argmax des deux côtés, part des buts) : v33875 74 % contre Necto, 47 % contre Nexto
+  (v30160 : 40 %), 55 % contre v30160 ; v31190 81 % / 45 % / 45 %. 1re touche au kickoff dans 31-46 % des cas contre
+  Necto et Nexto (0 % pour v30160).
+- Vrai jeu (série du 26/11, `runs/s10_ppo_kaggle/real_2026-11-26/`) : v33875 bat v30160 2-1 (6-2, 7-4, 5-6 en
+  prolongation), bat Necto 6-4, perd 4-11 contre Nexto. v33875 devient le bot.

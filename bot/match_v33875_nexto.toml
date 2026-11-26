@@ -1,0 +1,26 @@
+#:schema https://rlbot.org/schemas/match.json
+# Match RLBot v5 hors ligne : v33875 (bleu) contre nexto (orange). Série du 26/11/2026.
+[rlbot]
+launcher = "Epic"
+auto_start_agents = true
+wait_for_agents = true
+
+[match]
+game_mode = "Soccar"
+game_map_upk = "Stadium_P"
+skip_replays = true
+enable_rendering = false
+enable_state_setting = false
+
+[mutators]
+match_length = "FiveMinutes"
+
+[[cars]]
+type = "rlbot"
+team = 0
+config_file = "agent_v33875.toml"
+
+[[cars]]
+type = "rlbot"
+team = 1
+config_file = "../dist/opponents/NectoFamily/nexto/bot_venv.toml"

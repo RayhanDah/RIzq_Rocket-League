@@ -3,8 +3,8 @@
 [settings]
 agent_id = "ensisa/rlagent/v30160"
 name = "v30160"
-run_command = "..\\.venv-bot\\Scripts\\python.exe bot.py ..\\runs\\s10_ppo_kaggle\\pool\\actor_0030160068410.pt"
-run_command_linux = "../.venv-bot/bin/python bot.py ../runs/s10_ppo_kaggle/pool/actor_0030160068410.pt"
+run_command = "..\\.venv-bot\\Scripts\\python.exe bot.py ..\\runs\\s10_ppo_kaggle_s11\\pool\\actor_0030160068410.pt"
+run_command_linux = "../.venv-bot/bin/python bot.py ../runs/s10_ppo_kaggle_s11/pool/actor_0030160068410.pt"
 hivemind = false
 
 [details]
