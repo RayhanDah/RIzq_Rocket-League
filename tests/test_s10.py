@@ -21,8 +21,9 @@ def test_s10_effective_config(infra):
     e, r = cfg["env"], cfg["rewards"]
     assert {k: v for k, v in e["format_weights"].items() if v > 0} == {1: 1.0}
     assert {k: v for k, v in e["start_weights"].items() if v > 0} == {
-        "kickoff": 0.3, "random": 0.10, "aerial": 0.05, "attack_defense": 0.05, "drill_air": 0.15, "drill_reset": 0.05,
-        "drill_shot": 0.05, "drill_wall": 0.10, "drill_low_boost": 0.05, "drill_aerial_defense": 0.10}   # 08/11 : sans drill_aerial ; 17/11 : défense aérienne ×2 ; 22/11 : mur ×2
+        "kickoff": 0.3, "random": 0.06, "aerial": 0.05, "attack_defense": 0.05, "drill_air": 0.15, "drill_aerial": 0.05,
+        "drill_shot": 0.05, "drill_wall": 0.10, "drill_low_boost": 0.05, "drill_aerial_defense": 0.10,
+        "drill_dribble": 0.04}   # 17/11 : défense aérienne ×2 ; 22/11 : mur ×2 ; 26/11 : reset → aerial, dribble
     assert not e.get("adaptive_drills") and (e["ball_prediction"], e["race_features"], e["boost_features"]) == (
         True, False, False)
     assert r["anneal"] is None and r["team_spirit"]["end"] == 0.0

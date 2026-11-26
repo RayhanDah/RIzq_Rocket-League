@@ -76,12 +76,30 @@ def test_rollback_quota_is_per_session(tmp_path):
     assert len(nxt.state["rollbacks"]) == 2 and nxt.disabled_terms == ["aerial_touch"]
 
 
+def history_metrics(root, before_step, until_step):
+    """metrics.jsonl d'un run s10 qui couvre [before_step, until_step] (le dossier courant ne garde que la dernière
+    session après une récupération manuelle ; les plus anciennes sont renommées runs/s10_ppo_kaggle_sN)."""
+    import json as _json
+    import os as _os
+    for d in sorted(Path(root, "runs").glob("s10_ppo_kaggle*")):
+        p = d / "metrics.jsonl"
+        if not p.is_file() or p.stat().st_size == 0:
+            continue
+        with open(p, "rb") as f:
+            first = _json.loads(f.readline())
+            f.seek(max(0, _os.path.getsize(p) - 200_000))
+            last = _json.loads([ln for ln in f.read().splitlines() if ln.strip()][-1])
+        if first.get("global_step", 1e30) < before_step and last.get("global_step", 0) >= until_step:
+            return p
+    return None
+
+
 def test_guard_replayed_on_session_4_fires_before_9_g(tmp_path):
     """Rejoué sur les métriques réelles de la session 4 (si le run est sur la machine) : déclenché vers 8,85 G."""
     root = Path(__file__).resolve().parents[1]
-    path = root / "runs/s10_ppo_kaggle/metrics.jsonl"
-    if not path.exists():
-        pytest.skip("run s10_ppo_kaggle absent")
+    path = history_metrics(root, 8.1402e9, 9.0e9)
+    if path is None:
+        pytest.skip("historique du run s10_ppo_kaggle absent")
     import yaml
     cfg = yaml.safe_load((root / "configs/s10.yaml").read_text(encoding="utf-8"))
     g = TrainingGuard(cfg["train"]["guard"], tmp_path)

@@ -4,11 +4,9 @@ import numpy as np
 import pytest
 from helpers import make_state
 
-from rlagent.algo.worker import sparring_settings
 from rlagent.config import load_config
 from rlagent.curriculum import SkillCurriculum
 from rlagent.env.rewards import BigPadLowTerm, KickoffFirstTouchTerm, PowerslideTurnTerm, SlowTurnTerm, make_reward
-from rlagent.train import sparring_promotion
 
 NEW = ["kickoff_gagne", "contacts", "boost", "tir_cadre", "mobilite"]
 V30160 = "pool/actor_0030160068410.pt"
@@ -32,7 +30,7 @@ def stage(cfg, name):
 # --------------------------------------------------------------------------- configuration
 def test_stages_21_25_one_change_each(cfg):
     names = [s["name"] for s in cfg["curriculum"]["stages"]]
-    assert names[names.index("double_saut"):] == ["double_saut"] + NEW
+    assert names[names.index("double_saut"):names.index("mobilite") + 1] == ["double_saut"] + NEW
     w = weights(cfg)
     chg = lambda a, b: {k for k in set(a) | set(b) if a.get(k, 0.0) != b.get(k, 0.0)}   # noqa: E731
     seq = ["double_saut"] + NEW
@@ -55,20 +53,11 @@ def test_stages_21_25_are_gated_capped_and_anchored(cfg):
         assert stage(cfg, name)["blend_steps"] >= 200_000_000
     g = cfg["train"]["guard"]
     for t in ("kickoff_first", "big_pad_low", "slow_turn", "powerslide"):
-        assert g["term_max_share"][t] == 0.03 and g["fallback_weights"][t] == 0.0
+        assert g["term_max_share"][t] == (0.05 if t == "big_pad_low" else 0.03) and g["fallback_weights"][t] == 0.0
     assert "kickoff_first" in cfg["rewards"]["zero_sum_terms"]
     assert "slow_turn" not in cfg["rewards"]["zero_sum_terms"] and "big_pad_low" not in cfg["rewards"]["zero_sum_terms"]
     names = {t.name for t in make_reward(cfg).terms}
     assert {"kickoff_first", "big_pad_low", "slow_turn", "powerslide"} <= names
-
-
-def test_sparring_session_12(cfg):
-    sp = sparring_settings(cfg)
-    assert sp["nexto"]["prob"] == 0.04
-    for b in ("galactus", "kira", "rain"):
-        assert sp[b]["prob"] == 0.01 and sparring_promotion(cfg["selfplay"], b)[1] == 0.25
-    assert sparring_promotion(cfg["selfplay"], "nexto")[1] == 0.35
-    assert sum(b["prob"] for b in sp.values()) == pytest.approx(0.07)
 
 
 # --------------------------------------------------------------------------- termes

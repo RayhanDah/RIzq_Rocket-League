@@ -242,7 +242,7 @@ def test_finition_uses_new_terms_and_drills():
     assert next(t for t in rf.terms if isinstance(t, AerialTouchTerm)).min_air_boost == pytest.approx(30.0)
     w = cfg["env"]["start_weights"]
     assert sum(w.values()) == pytest.approx(1.0) and w["drill_shot"] > 0.0
-    assert w["drill_aerial"] == 0.0 and w["drill_air"] > 0.0        # 08/11 : 0 % de réussite en session 4, remplacé par le vol
+    assert w["drill_air"] > 0.0        # 08/11 : drill_aerial à 0 (0 % en session 4) ; 26/11 : de retour à 5 % (palier 29)
     assert cfg["env"]["drill_curriculum"]["enabled"]
 
 

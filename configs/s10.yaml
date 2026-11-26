@@ -50,12 +50,14 @@ train:
           # retour au poids de la session 8 (0).
           term_max_share: {kickoff_win: 0.05, kickoff_rush: 0.05, demo: 0.08, aerial_touch: 0.05, save: 0.05, bump: 0.05,
                            small_pad: 0.03, kickoff_stall: 0.03, demo_goal: 0.03, high_goal: 0.03, bump_goal: 0.03,
-                           wall_touch: 0.03, fast_aerial: 0.03, kickoff_first: 0.03, big_pad_low: 0.03,
-                           slow_turn: 0.03, powerslide: 0.03},
+                           wall_touch: 0.03, fast_aerial: 0.03, kickoff_first: 0.03, big_pad_low: 0.05,
+                           slow_turn: 0.03, powerslide: 0.03, keeper_bump: 0.03},
           fallback_weights: {kickoff_win: 3.0, kickoff_rush: 0.05, demo: 5.3, aerial_touch: 1.0, bump: 1.3,
                              kickoff_stall: 0.0, demo_goal: 4.0, high_goal: 0.0, bump_goal: 0.0, wall_touch: 0.0,
                              fast_aerial: 0.0, kickoff_first: 0.0, big_pad_low: 0.0, slow_turn: 0.0,
-                             powerslide: 0.0},
+                             powerslide: 0.0, keeper_bump: 0.0},
+          # 26/11 (session 13) : big_pad_low renforcé (0,5 → 2) : plafond 3 → 5 % comme les autres termes renforcés
+          # (2,30 % du signal mesuré en auto-jeu de v33875 aux poids du palier 29, avant tout apprentissage).
           reenable_terms: [aerial_touch]}
 env:
   # 1v1 uniquement : le match se joue en 1v1 (README) ; 2v2/3v3 plus tard. Les profils FUSIONNENT les dictionnaires :
@@ -67,8 +69,13 @@ env:
   # 3,7 %). `drill_reset` : roues face à la balle, pour que le reward `flip_reset` puisse se déclencher.
   # 08/11 : `drill_aerial` retiré (0 % de réussite sur toute la session 4, 3,7 % sur la 3), ses 5 % vont au jeu libre.
   # 17/11 (session 8, PO : il ne défend pas les tirs aériens de Necto) : drill_aerial_defense 5 → 10 %, pris au jeu libre.
-  start_weights: {kickoff: 0.3, random: 0.10, aerial: 0.05, attack_defense: 0.05, drill_air: 0.15, drill_reset: 0.05,
-                  drill_aerial: 0.0, drill_shot: 0.05, drill_wall: 0.10, drill_low_boost: 0.05, drill_aerial_defense: 0.10}
+  # 26/11 (session 13, PO) : drill_reset 5 → 0 % (niveau bloqué à 0 pendant toute la session 12, 29-31 % de réussite pour
+  # 60 % exigés, aucun flip reset en match) ; ses 5 % vont à drill_aerial (rendez-vous : voiture au sol avec du boost,
+  # balle haute, l'aérienne rapide du palier 29). drill_dribble 4 % (palier 28 : balle sur le capot face au gardien),
+  # pris au jeu libre (random 0,10 → 0,06). Actifs dès la reprise : ce sont des états de départ, pas des rewards.
+  start_weights: {kickoff: 0.3, random: 0.06, aerial: 0.05, attack_defense: 0.05, drill_air: 0.15, drill_reset: 0.0,
+                  drill_aerial: 0.05, drill_shot: 0.05, drill_wall: 0.10, drill_low_boost: 0.05, drill_aerial_defense: 0.10,
+                  drill_dribble: 0.04}
   # 22/11 (session 10, PO : plus à l'aise au mur) : drill_wall 5 → 10 %, pris au jeu libre (random 0,15 → 0,10).
   # Plancher 0,4 de l'aérien : balles à 580-890 uu, au-dessus du seuil des rewards aériens et hors de portée d'un simple
   # saut. Vol et reset partent de 0 (leur niveau mesure justement le recul par rapport au geste).
@@ -114,7 +121,7 @@ rewards:
   # demo_goal, high_goal (20/11) : bonus de but, zéro-somme comme le but. kickoff_stall n'y est PAS : attendre coûte
   # aux deux camps (en zéro-somme, les deux pénalités s'annuleraient).
   zero_sum_terms: [goal, vel_ball_to_goal, demo, bump, aerial_touch, save, demo_goal, high_goal, bump_goal, wall_touch,
-                   fast_aerial, kickoff_first]
+                   fast_aerial, kickoff_first, keeper_bump]
   team_spirit: {start: 0.0, end: 0.0, steps: 1}
   anneal: null                     # aucune décroissance programmée en steps : c'est le curriculum qui décide
   vel_player_to_ball_signed: true
@@ -392,6 +399,41 @@ curriculum:
     - name: mobilite
       rewards: {slow_turn: 0.3, powerslide: 0.1}
       blend_steps: 200_000_000
+      # Session 13 : déjà 1,67 G steps à ce palier (32,20 → 33,88 G) ; passe au palier 26 dès la reprise.
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0033875014025: -25}
+    # Paliers 26-29 (26/11, décision PO après la série du 26/11 : v33875 bat v30160 2-1 et Necto 6-4, perd 4-11 contre
+    # Nexto). Même méthode : 200 M steps de transition, 500 M au moins, passage sans régression face à v33875 (le bot
+    # actuel, ancre), plafond de 3 % du signal pour chaque nouveau terme.
+    # Palier 26 (boost moyen 28,5 contre 42,7 pour Nexto, sous 10 de boost 43 % du temps contre 31 % ; big_pad_low à 0,5
+    # n'a rien changé, 0,34 % du signal) : gros pad à sec 0,5 → 2 (au plus 6 / min, donc 12 / min, 60 % d'un but, si la
+    # boucle « brûler puis reprendre » était jouée à fond : plafond de 3 % du garde-fou). boost_gain reste à 1 : à 1,5,
+    # la boucle « tourner autour des petits pads » paierait 10,6 / min, plus qu'un demi-but (tests/test_exploits.py).
+    - name: boost_plus
+      rewards: {big_pad_low: 2.0}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0033875014025: -25}
+    # Palier 27 (PO : mobilité × 5 ; à 0,3 / 0,1, slow_turn et powerslide ne pesaient que 0,05 % et 0,01 % du signal) :
+    # slow_turn 0,3 → 1,5, powerslide 0,1 → 0,5 (boucle des dérapages : au plus 30 × 0,5 = 15 / min, cf. test).
+    - name: mobilite_x5
+      rewards: {slow_turn: 1.5, powerslide: 0.5}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0033875014025: -25}
+    # Palier 28 (PO : balle sur le capot vers le but, il ne bumpe pas le gardien alors que la balle rentrerait seule) :
+    # keeper_bump 1, payé tout de suite (bump_goal ne paie que si le but suit et reste à 4,5 : avec high_goal 5, les
+    # bonus de but restent sous un demi-but, 10). Une fois par possession, 10 s entre deux : ≤ 6 / min. Avec drill_dribble.
+    - name: bump_gardien
+      rewards: {keeper_bump: 1.0}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0033875014025: -25}
+    # Palier 29 (PO : aériennes hautes lentes ; fast_aerial à 1 pèse 0,01 % du signal, 0,01 but aérien / min contre 0,07
+    # pour Nexto) : fast_aerial 1 → 2 (double saut puis touche à 500 uu ou plus dans les 0,8 s), avec drill_aerial à 5 %.
+    - name: aeriennes_rapides
+      rewards: {fast_aerial: 2.0}
+      blend_steps: 200_000_000
 selfplay:
   hist_prob: 0.25
   # Sparring contre des bots externes (selfplay.sparring, algo/worker.py). Session 10 (22/11) : Nexto seul, 10 %.
@@ -411,11 +453,13 @@ selfplay:
     # Session 12 (PO, 25/11) : Nexto 4 % (beta repris du checkpoint, 0,9) ; les trois GigaLearn à 1 %, seuil de montée
     # 0,25 (bloqués à ~22 % de victoires sous 0,35 en session 11). Sparring 7 % au lieu de 14 % : moins de coût (−27 %
     # de débit en session 11) pour le self-play.
+    # Session 13 (PO, 26/11) : Nexto 9 % (beta repris du checkpoint, 1 = argmax) ; les trois GigaLearn retirés (taux de
+    # victoire plat sur toute la session 12 : galactus ~17 %, kira ~17 %, rain ~14 %).
     bots:
-      galactus: {prob: 0.01, beta_start: 0.3, promote_score: 0.25}
-      kira: {prob: 0.01, beta_start: 0.3, promote_score: 0.25}
-      nexto: {prob: 0.04, beta_start: 0.5}
-      rain: {prob: 0.01, beta_start: 0.5, promote_score: 0.25}
+      galactus: {prob: 0.0, beta_start: 0.3, promote_score: 0.25}
+      kira: {prob: 0.0, beta_start: 0.3, promote_score: 0.25}
+      nexto: {prob: 0.09, beta_start: 0.5}
+      rain: {prob: 0.0, beta_start: 0.5, promote_score: 0.25}
   pool_every_steps: 5_000_000
   pool_recent: 20
   pfsp: true                       # (1 − p)² : les ancres déjà battues ne coûtent presque plus de parties
@@ -432,8 +476,11 @@ selfplay:
   # v18160) ; repère des paliers 15-17. C'est le dernier checkpoint, pas une version du pool : nommé actor_0023037887394.
   # v25785 : meilleure version de la session 9 et bot actuel (BO3 du 21/11 : 2-0 contre Necto et v27450, 1-2 contre
   # v23037) ; repère des paliers 18-20.
+  # v30160 : fin de la session 11, repère des paliers 21-25. v33875 : fin de la session 12 et bot actuel (26/11 : 2-1
+  # contre v30160, 6-4 contre Necto dans le vrai jeu) ; repère des paliers 26-29.
   anchors: [runs/s6_spo_kaggle, pool/actor_0005315235148.pt, pool/actor_0006800183709.pt, pool/actor_0007000329112.pt,
             pool/actor_0007565061406.pt, pool/actor_0008100114172.pt, pool/actor_0008400059217.pt,
             pool/actor_0013535043833.pt, pool/actor_0013600266923.pt, pool/actor_0013720292116.pt,
-            pool/actor_0018160005774.pt, checkpoints/ckpt_0023037887394.pt, pool/actor_0025785348226.pt, pool/actor_0030160068410.pt]
+            pool/actor_0018160005774.pt, checkpoints/ckpt_0023037887394.pt, pool/actor_0025785348226.pt, pool/actor_0030160068410.pt,
+            pool/actor_0033875014025.pt]
   anchor_prob: 0.5                 # 12,5 % des épisodes

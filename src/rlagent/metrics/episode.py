@@ -32,7 +32,7 @@ KICKOFF_EVAL_S = 3.0
 # Réussite des exercices (env/mutators.py, `drill_*`) pour l'équipe testée, dans une fenêtre en secondes.
 # "defense" réussit si aucun but n'est encaissé dans la fenêtre ; les autres si la condition est vue dans la fenêtre.
 DRILL_WINDOW_S = {"defense": 6.0, "shot": 6.0, "aerial": 4.0, "wall": 5.0, "low_boost": 6.0, "recovery": 2.0,
-                  "aerial_defense": 6.0, "air": 3.0, "reset": 3.0}
+                  "aerial_defense": 6.0, "air": 3.0, "reset": 3.0, "dribble": 6.0}
 NO_GOAL_DRILLS = ("defense", "aerial_defense")   # réussite = aucun but encaissé dans la fenêtre
 AIR_TOUCH_Z = 300.0                             # exercice de vol : touche au-dessus de cette hauteur
 AERIAL_TOUCH_Z = 400.0                          # exercice aérien sans niveau (s6)
@@ -269,7 +269,7 @@ class EpisodeTracker:
             self.drill_result = 0.0
             return
         ok = False
-        if kind == "shot":
+        if kind in ("shot", "dribble"):
             ok = bool(state.goal_scored and state.scoring_team == team)
         elif kind == "aerial":
             ok = (any(c.ball_touches > 0 for c in mine)

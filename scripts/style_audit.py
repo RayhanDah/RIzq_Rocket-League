@@ -37,11 +37,17 @@ AERIAL_Z = 500.0               # hauteur de balle d'une touche aérienne (comme 
 AIR_BOOST_S = 0.25             # boost en l'air avant la touche pour parler de vraie aérienne
 WALL_TAKEOFF_Z = 300.0         # décollage au-dessus : la voiture quitte un mur
 STRONG_DV = 556.0              # frappe (uu/s), seuil de strong_touch
+DK_S = 3.0                     # dribble face au gardien : issue cherchée dans les 3 s
+FLICK_S = (0.25, 0.4)          # flick : flip lancé ≤ 0,25 s après le dribble, frappe ≤ 0,4 s après le flip
+DASH_GROUND_S = 0.25           # dash : flip lancé au ras du sol (< 120 uu), ≤ 0,25 s après avoir quitté le sol (saut, puis dodge 2 steps après)
 
 COUNTERS = ("goals", "touches", "strong_touches", "on_target", "off_target", "spoils", "on_target_balls", "saves",
             "aerial_touches", "true_aerials", "wall_aerials", "aerial_goals", "flip_resets", "bumps", "demos", "flips",
             "pickups", "kickoffs", "kickoff_first_touch", "kickoff_won", "kickoff_goals", "own_goals",
-            "kickoff_stalls", "demo_goals", "high_goals")
+            "kickoff_stalls", "demo_goals", "high_goals",
+            # 26/11 : dribble face au gardien (balle à nous vers le but adverse, gardien dans ses cages) et ce qui suit
+            "dribbles", "dk", "dk_bump", "dk_flick", "dk_lost", "dk_goal", "dk_bump_goal",
+            "dashes", "dashes_noboost", "flicks", "flicks_on_target")
 SUMS = ("speed", "boost", "supersonic", "air", "air_boost", "low_boost", "own_half", "ball_dist", "closer", "steps")
 
 _env = None
@@ -102,11 +108,12 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
         ball = (s.ball.position.tolist(), s.ball.linear_velocity.tolist())
         cars = {a: {"flip": bool(c.has_flipped), "demo": float(c.demo_respawn_timer), "boost": float(c.boost_amount),
                     "victim": c.bump_victim_id, "air_boost": 0.0, "takeoff_z": 17.0, "ground": bool(c.on_ground),
-                    "jumped": bool(c.has_jumped)}
+                    "jumped": bool(c.has_jumped), "drib": False, "drib_t": -9.0, "ground_t": 0.0,
+                    "flick_t": None, "dk": None}
                 for a, c in s.cars.items()}
         return ball, cars
 
-    from rlagent.env.rewards import DemoGoalTerm, HighGoalTerm
+    from rlagent.env.rewards import DemoGoalTerm, HighGoalTerm, attack_on_keeper, is_dribbling
     goal_terms = {"demo_goals": DemoGoalTerm(window_s=_rc.get("demo_goal_window_s", 3.0),
                                            last_defender_only=_rc.get("demo_goal_last_defender", True),
                                            own_half_only=_rc.get("demo_goal_own_half", True),
@@ -174,6 +181,45 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
                               and float(c.demo_respawn_timer) > 0.0 and prev[o]["demo"] <= 0.0
                               and car.bump_victim_id == o)
             d["bumps"] += car.bump_victim_id is not None and car.bump_victim_id != p["victim"]
+            new_victim = car.bump_victim_id if car.bump_victim_id != p["victim"] else None
+            flip_start = bool(car.has_flipped) and not p["flip"]
+            drib = is_dribbling(car, pos, vel)
+            d["dribbles"] += drib and not p["drib"]
+            if drib:
+                p["drib_t"] = t
+            if ground:
+                p["ground_t"] = t
+            if flip_start:
+                if t - p["drib_t"] <= FLICK_S[0]:
+                    p["flick_t"] = t
+                if float(car.physics.position[2]) < 120.0 and t - p["ground_t"] <= DASH_GROUND_S:
+                    d["dashes"] += 1
+                    d["dashes_noboost"] += not car.is_boosting
+            if p["flick_t"] is not None and t - p["flick_t"] > FLICK_S[1]:
+                p["flick_t"] = None
+            if p["flick_t"] is not None and car.ball_touches > 0 and dv >= STRONG_DV:
+                d["flicks"] += 1
+                d["flicks_on_target"] += goal_threat(pos, vel, sign) > 0.0
+                p["flick_t"] = None
+            dk = p["dk"]
+            if dk is not None and t - dk["t"] > DK_S:
+                p["dk"] = dk = None
+            if dk is None and drib:
+                keeper = attack_on_keeper(state, car, pos, vel)
+                if keeper is not None:
+                    d["dk"] += 1
+                    p["dk"] = dk = {"t": t, "keeper": keeper, "out": None, "bump_t": None}
+            if dk is not None and dk["out"] is None:
+                opp_touch = any(c.ball_touches > 0 for c in state.cars.values() if c.team_num != car.team_num)
+                if new_victim == dk["keeper"]:
+                    dk["out"], dk["bump_t"] = "bump", t
+                    d["dk_bump"] += 1
+                elif flip_start:
+                    dk["out"] = "flick"
+                    d["dk_flick"] += 1
+                elif opp_touch:
+                    dk["out"] = "lost"
+                    d["dk_lost"] += 1
             if ground:
                 p["air_boost"], p["takeoff_z"] = 0.0, float(car.physics.position[2])
             elif car.is_boosting:
@@ -203,7 +249,7 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
                     elif p["takeoff_z"] > WALL_TAKEOFF_Z:
                         d["wall_aerials"] += 1
             d["flip_resets"] += is_flip_reset(car, state.ball.position, p["ground"], p["jumped"])
-            p.update(flip=bool(car.has_flipped), demo=demo, boost=boost, victim=car.bump_victim_id, ground=ground,
+            p.update(drib=drib, flip=bool(car.has_flipped), demo=demo, boost=boost, victim=car.bump_victim_id, ground=ground,
                      jumped=bool(car.has_jumped))
         prev_ball = (pos, vel)
         ep_steps += 1
@@ -222,6 +268,12 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
             elif abs(pos[1]) > 0.0:
                 st[side_of[0] if pos[1] > 0 else side_of[1]]["kickoff_won"] += 1
         if scored:
+            for ag, car in state.cars.items():          # but pendant une situation « dribble face au gardien »
+                dk = prev[ag]["dk"]
+                if dk is not None and car.team_num == state.scoring_team:
+                    st[side_of[car.team_num]]["dk_goal"] += 1
+                    if dk["bump_t"] is not None and t - dk["bump_t"] <= 2.0:
+                        st[side_of[car.team_num]]["dk_bump_goal"] += 1
             st[side_of[state.scoring_team]]["goals"] += 1
             if ep_steps * _tick_s <= KICKOFF_GOAL_S:
                 st[side_of[state.scoring_team]]["kickoff_goals"] += 1
@@ -282,6 +334,12 @@ def summarize(d: dict) -> dict:
                    "temps_en_l_air_%": 100 * d["air"] / n, "boost_en_l_air_%": 100 * d["air_boost"] / max(1.0, d["air"]),
                    "boost_moyen": d["boost"] / n, "moins_de_10_boost_%": 100 * d["low_boost"] / n,
                    "ramassages/min": per_min("pickups")},
+        "dribble": {"dribbles/min": per_min("dribbles"), "face_gardien/min": per_min("dk"),
+                    "fg_bump_%": 100 * d["dk_bump"] / max(1, d["dk"]), "fg_flick_%": 100 * d["dk_flick"] / max(1, d["dk"]),
+                    "fg_perdue_%": 100 * d["dk_lost"] / max(1, d["dk"]), "fg_but_%": 100 * d["dk_goal"] / max(1, d["dk"]),
+                    "fg_bump_puis_but": d["dk_bump_goal"], "flicks/min": per_min("flicks"),
+                    "flicks_cadres_%": 100 * d["flicks_on_target"] / max(1, d["flicks"]),
+                    "dashes/min": per_min("dashes"), "dashes_sans_boost/min": per_min("dashes_noboost")},
     }
 
 
@@ -331,7 +389,7 @@ def main():
         name = spec.split(":", 1)[0]
         res[f"{name}_fidelite"] = bot_fidelity(spec)
         print(f"--- {name.capitalize()} (adaptateur RocketSim)\n" + res[f"{name}_fidelite"]["texte"])
-    for block in ("rush", "finition", "kickoff", "aerien"):
+    for block in ("rush", "finition", "kickoff", "aerien", "dribble"):
         print(f"--- {block}" + " " * 22 + "A        B")
         for k in res["A"][block]:
             print(f"{k:30s} {res['A'][block][k]:8.2f} {res['B'][block][k]:8.2f}")

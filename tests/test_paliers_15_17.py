@@ -552,9 +552,10 @@ def test_v23037_checkpoint_anchor_matches_the_bot(tmp_path):
 def test_guard_replayed_on_sessions_7_and_8_stays_quiet():
     """PO : le garde-fou doit rester silencieux sur une session saine. Rejoué avec la configuration de la session 9 sur
     les métriques réelles des sessions 7 et 8 (13,76 → 23,04 G), jalons tous les 250 M steps comme à l'entraînement."""
-    path = ROOT / "runs/s10_ppo_kaggle/metrics.jsonl"
-    if not path.exists():
-        pytest.skip("run s10_ppo_kaggle absent")
+    from test_guard import history_metrics
+    path = history_metrics(ROOT, 13.762e9, 23.05e9)
+    if path is None:
+        pytest.skip("historique du run s10_ppo_kaggle absent")
     import tempfile
 
     import yaml

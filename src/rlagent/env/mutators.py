@@ -525,8 +525,38 @@ class RecoveryDrill(_Drill):
             car.boost_amount = float(r.uniform(0, 100))
 
 
+class DribbleDrill(_Drill):
+    """Palier 28 (26/11, PO : il arrive souvent balle sur le capot face au gardien ; un bump du gardien et la balle rentre
+    seule). Notre voiture au sol dans le camp adverse, lancée vers le but adverse, balle posée sur son toit et qui avance
+    avec elle ; le gardien adverse dans ses cages, immobile ou qui sort à sa rencontre. Le reste de l'épisode est un match
+    normal : tirer, flicker ou bumper le gardien, au bot de choisir. Réussite : but de notre équipe en 6 s
+    (metrics/episode.py)."""
+    kind = "dribble"
+
+    def setup(self, state, team, r):
+        d = _dir(team)
+        goal_y = d * cv.BACK_WALL_Y
+        car = _team_cars(state, team)[0]
+        x, y = r.uniform(-1500, 1500), d * r.uniform(1000, 3300)
+        to_goal = np.array([r.uniform(-700, 700) - x, goal_y - y])
+        yaw = float(np.arctan2(to_goal[1], to_goal[0]) + r.normal(0, 0.1))
+        speed = r.uniform(700, 1400)
+        _place_car(car, x, y, yaw, speed, r.uniform(15, 80))
+        fwd = np.array([np.cos(yaw), np.sin(yaw)])
+        state.ball.position = np.array([x + 15.0 * fwd[0], y + 15.0 * fwd[1], 17.0 + 140.0], dtype=np.float32)
+        state.ball.linear_velocity = car.physics.linear_velocity.copy()
+        state.ball.angular_velocity = np.zeros(3, dtype=np.float32)
+        for k, opp in enumerate(_team_cars(state, 1 - team)):
+            if k == 0:                                       # gardien
+                kx, ky = r.uniform(-700, 700), goal_y - d * r.uniform(100, 700)
+                _place_car(opp, kx, ky, float(np.arctan2(y - ky, x - kx)), r.uniform(0, 600), r.uniform(0, 100))
+            else:                                            # coéquipiers adverses en retard (2v2 / 3v3)
+                _place_car(opp, r.uniform(-3000, 3000), y - d * r.uniform(1500, 3500), float(d * np.pi / 2),
+                           r.uniform(500, 1500), r.uniform(0, 100))
+
+
 DRILLS = {cls.kind: cls for cls in (DefenseDrill, ShotDrill, AerialDrill, WallDrill, LowBoostDrill, RecoveryDrill,
-                                    AerialDefenseDrill, AirDrill, ResetDrill)}
+                                    AerialDefenseDrill, AirDrill, ResetDrill, DribbleDrill)}
 LEVELED_DRILLS = tuple(k for k, cls in DRILLS.items() if cls.leveled)
 
 

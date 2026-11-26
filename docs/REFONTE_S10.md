@@ -978,3 +978,44 @@ Décisions du PO après la série du 24/11 :
   Necto et Nexto (0 % pour v30160).
 - Vrai jeu (série du 26/11, `runs/s10_ppo_kaggle/real_2026-11-26/`) : v33875 bat v30160 2-1 (6-2, 7-4, 5-6 en
   prolongation), bat Necto 6-4, perd 4-11 contre Nexto. v33875 devient le bot.
+
+## 19. Session 13 : paliers 26-29, Setters dribble et aérienne rapide, sparring Nexto (26/11/2026)
+Décisions du PO après la série du 26/11, et ce qu'il a vu dans les matchs :
+
+| Palier | Changement | Faiblesse visée |
+|---|---|---|
+| 26 boost_plus | `big_pad_low` 0,5 → 2 | boost moyen 28,5 contre 42,7 pour Nexto, sous 10 de boost 43 % du temps contre 31 % |
+| 27 mobilite_x5 | `slow_turn` 0,3 → 1,5, `powerslide` 0,1 → 0,5 (× 5, choix du PO) | à 0,3 / 0,1 : 0,05 % et 0,01 % du signal, rien n'a bougé |
+| 28 bump_gardien | `keeper_bump` 0 → 1 (nouveau) + Setter `drill_dribble` 4 % | balle sur le capot face au gardien : il ne le bumpe jamais |
+| 29 aeriennes_rapides | `fast_aerial` 1 → 2 + `drill_aerial` 5 % (à la place de `drill_reset`) | aériennes hautes lentes : 0,01 but aérien / min contre 0,07 pour Nexto |
+
+- `keeper_bump` (`env/rewards.py`) : +1 au début d'un bump (sans démo) sur le gardien adverse (sa voiture la plus proche
+  de son but, à moins de 1 800 uu du fond du filet, entre la balle et la ligne), si la balle est à nous (dernière touche,
+  à moins de 400 uu, dans le camp adverse, vers le but adverse à plus de 300 uu/s). Payé tout de suite : `bump_goal` ne
+  paie que si le but suit, et ne peut pas monter (4,5 ; avec `high_goal` 5, les bonus de but restent sous un demi-but,
+  10). Une fois par possession, 10 s entre deux : ≤ 6 / min. Zéro-somme.
+- `drill_dribble` (`env/mutators.py`) : voiture lancée vers le but adverse dans le camp adverse, balle posée sur le toit
+  (elle y reste 10 steps sur 10 en accélérant), gardien dans ses cages. Réussite : but en 6 s. Pris au jeu libre
+  (`random` 0,10 → 0,06).
+- `drill_reset` → 0 : niveau bloqué à 0 sur toute la session 12 (29-31 % de réussite pour 60 % exigés), aucun flip reset
+  en match. Ses 5 % vont à `drill_aerial` (rendez-vous : voiture au sol avec du boost, balle haute), écarté depuis la
+  session 4 (0 % de réussite à l'époque ; v33875 fait ~8,8 touches aériennes / min).
+- Les Setters sont des états de départ : ils sont actifs dès la reprise, les rewards suivent le curriculum.
+- Sparring : Nexto 9 % (beta 1 repris du checkpoint) ; Galactus, Kira et Rain retirés (taux de victoire plat sur toute
+  la session 12). Ancre : v33875, passage des paliers sans régression face à elle (écart ≥ −25).
+- Écartés après vérification :
+  - `boost_gain` 1 → 1,5 : la boucle « tourner autour des petits pads » paierait 10,6 / min, plus qu'un demi-but
+    (`tests/test_exploits.py`) ; gardé à 1.
+  - palier « déviations » : proposé sur une mauvaise lecture de l'audit. `deviations` compte les balles déjà cadrées
+    que le tireur décadre lui-même (`spoils`) ; Nexto le fait plus (17,6 % contre 7,2 %), ce n'est pas une compétence à
+    copier.
+  - infinite dash : mesuré d'abord (nouveau détecteur de l'audit : dodge sous 120 uu, ≤ 0,25 s après avoir quitté le
+    sol). v33875 7,9 dashes / min (2,9 sans boost), Nexto 8,4 (4,2) : écart faible, pas de reward cette session.
+  - flicks : déjà payés quand ils sont cadrés (`shot_threat` 5) ; seulement mesurés (détecteur de l'audit).
+- Mesure « dribble face au gardien » (`scripts/style_audit.py`, bloc `dribble`, 24 matchs) : contre Nexto 0,10
+  situation / min, issues : bump 0 %, flick 42 %, balle perdue 50 %, but 17 % ; contre v30160 0,01 / min. Le bot ne
+  bumpe jamais le gardien, comme vu par le PO ; la situation est plus rare en simulation que dans le vrai jeu.
+- Part du signal en auto-jeu (v33875 argmax, poids du palier 29, départs du profil, 120 k steps) : `big_pad_low` 2,30 %
+  (plafond du garde-fou relevé de 3 à 5 %, comme les autres termes renforcés), `slow_turn` 0,21 %, `powerslide` 0,07 %,
+  `fast_aerial` et `keeper_bump` 0 % (gestes absents en argmax : ce sont la politique échantillonnée et les Setters qui
+  doivent les faire apparaître).

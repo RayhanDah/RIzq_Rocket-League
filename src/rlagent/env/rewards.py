@@ -1386,6 +1386,97 @@ class PowerslideTurnTerm(RewardTerm):
         return out
 
 
+# --------------------------------------------------------------------------- paliers 26-29 (26/11/2026)
+DRIBBLE_MAX_XY = 180.0          # balle sur le toit : à moins de 180 uu du centre de la voiture à l'horizontale…
+DRIBBLE_Z = (110.0, 300.0)      # … entre 110 et 300 uu de haut (posée vers 150 sur un Octane au sol)…
+DRIBBLE_MAX_REL = 600.0         # … et qui avance avec la voiture (écart de vitesse sous 600 uu/s)
+KEEPER_MAX_DIST = 1800.0        # gardien : à moins de 1 800 uu du fond du filet (~900 uu devant la ligne de but)
+
+
+def is_dribbling(car, ball_pos, ball_vel) -> bool:
+    """Voiture au sol, balle posée sur son toit et qui avance avec elle (dribble)."""
+    if not car.on_ground or car.is_demoed:
+        return False
+    p = car.physics.position
+    dx, dy, dz = ball_pos[0] - p[0], ball_pos[1] - p[1], ball_pos[2] - p[2]
+    if dx * dx + dy * dy > DRIBBLE_MAX_XY ** 2 or not DRIBBLE_Z[0] <= dz <= DRIBBLE_Z[1]:
+        return False
+    return norm3(np.asarray(ball_vel) - car.physics.linear_velocity) < DRIBBLE_MAX_REL
+
+
+def keeper_of(state, team: int, ball_pos) -> Optional[str]:
+    """Gardien de l'équipe `team` : sa voiture la plus proche de son but, à moins de `KEEPER_MAX_DIST` du fond du but,
+    plus près de ce but que la balle (entre la balle et la ligne). None sinon."""
+    goal = _OWN_GOAL if team == cv.BLUE_TEAM else _OWN_GOAL_ORANGE
+    ball_d = math.dist(ball_pos, goal)
+    best, best_d = None, KEEPER_MAX_DIST
+    for a, car in state.cars.items():
+        if car.team_num != team or car.is_demoed:
+            continue
+        d = _own_goal_dist(car)
+        if d < best_d and d < ball_d:
+            best, best_d = a, d
+    return best
+
+
+def attack_on_keeper(state, car, ball_pos, ball_vel, min_vy: float = 300.0) -> Optional[str]:
+    """Situation « balle à nous vers le but adverse, gardien dans ses cages » : balle dans le camp adverse, qui file vers
+    le but adverse à plus de `min_vy` uu/s, à moins de 400 uu de la voiture (dribble ou conduite). Renvoie le gardien."""
+    s = _team_sign(car.team_num)
+    if ball_pos[1] * s <= 0.0 or ball_vel[1] * s < min_vy:
+        return None
+    p = car.physics.position
+    if math.hypot(ball_pos[0] - p[0], ball_pos[1] - p[1]) > 400.0:
+        return None
+    return keeper_of(state, 1 - car.team_num, ball_pos)
+
+
+class KeeperBumpTerm(RewardTerm):
+    """Palier 28 (26/11, PO : balle sur le capot vers le but, il suffit de bumper le gardien et la balle rentre seule).
+    +1 au début d'un bump (sans démo) sur le gardien adverse (`keeper_of`), si la balle est à nous : notre équipe l'a
+    touchée en dernier, elle est à moins de 400 uu de nous, dans le camp adverse et file vers le but adverse
+    (`attack_on_keeper`). Payé tout de suite, contrairement à `bump_goal` (seulement si le but suit), pour que le geste
+    soit appris même quand le but ne vient pas. Une fois par possession (jusqu'à ce que l'adversaire touche la balle) et
+    au plus une fois toutes les `cooldown_s` secondes par voiture : la boucle « bumper le gardien sans marquer » rapporte
+    au plus 60 / cooldown_s par minute × poids (tests/test_paliers_26_29.py). Zéro-somme : le gardien bumpé perd autant."""
+    name = "keeper_bump"
+
+    def __init__(self, cooldown_s: float = 10.0):
+        self.cooldown_s = float(cooldown_s)
+
+    def reset(self, agents, state, shared_info):
+        self.prev = {a: _contact_victim(state.cars[a]) for a in agents}
+        self.last: Dict[str, int] = {}
+        self.owner: Optional[int] = None         # équipe qui a touché la balle en dernier
+        self.paid: set = set()                   # voitures déjà payées pendant cette possession
+
+    def get(self, agents, state, shared_info):
+        tick = int(getattr(state, "tick_count", 0) or 0)
+        teams = {state.cars[a].team_num for a in agents if state.cars[a].ball_touches > 0}
+        if len(teams) == 1:
+            team = teams.pop()
+            if team != self.owner:
+                self.owner, self.paid = team, set()
+        elif teams:
+            self.owner, self.paid = None, set()
+        ball_pos, ball_vel = state.ball.position.tolist(), state.ball.linear_velocity.tolist()
+        out = {a: 0.0 for a in agents}
+        for a in agents:
+            car = state.cars[a]
+            victim = _contact_victim(car)
+            new = victim is not None and victim != self.prev.get(a) and victim in state.cars
+            self.prev[a] = victim
+            if not new or state.cars[victim].is_demoed or car.team_num != self.owner or a in self.paid:
+                continue
+            if tick - self.last.get(a, -10**9) < self.cooldown_s * cv.TICKS_PER_SECOND:
+                continue
+            if attack_on_keeper(state, car, ball_pos, ball_vel) == victim:
+                out[a] = 1.0
+                self.paid.add(a)
+                self.last[a] = tick
+        return out
+
+
 class TeamReward(RewardFunction[str, GameState, float]):
     """`stage_weights` : poids possibles des paliers du curriculum (`curriculum.stages`, curriculum.py). Les termes
     utilisés par au moins un palier sont construits dès le départ ; les poids du moment arrivent par
@@ -1555,6 +1646,8 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
         SlowTurnTerm(min_angle_deg=rc.get("slow_turn_min_angle_deg", 110.0),
                      max_speed=rc.get("slow_turn_max_speed", 800.0), min_dist=rc.get("slow_turn_min_dist", 700.0)),
         PowerslideTurnTerm(cooldown_s=rc.get("powerslide_cooldown_s", 2.0)),
+        # paliers 26-29 (26/11/2026)
+        KeeperBumpTerm(cooldown_s=rc.get("keeper_bump_cooldown_s", 10.0)),
     ]
     stages = (cfg.get("curriculum") or {}).get("stages") or []
     return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0),

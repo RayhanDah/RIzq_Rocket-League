@@ -250,7 +250,7 @@ def test_air_drill_succeeds_on_a_touch_in_the_air():
 
 
 def test_new_drills_do_not_shift_the_seeds_of_the_older_ones():
-    assert list(DRILLS)[-2:] == ["air", "reset"] and list(DRILLS)[0] == "defense"
+    assert list(DRILLS)[-3:] == ["air", "reset", "dribble"] and list(DRILLS)[0] == "defense"
 
 
 def resets(level, n=60):
@@ -301,7 +301,7 @@ def test_reset_drill_succeeds_on_a_flip_reset_only():
 
 def test_each_drill_can_set_its_own_start_and_floor():
     cfg = load_config(["kaggle_tpu", "s10"])
-    cfg["env"]["start_weights"]["drill_aerial"] = 0.05     # retiré du profil le 08/11 : on vérifie le mécanisme
+    cfg["env"]["start_weights"]["drill_reset"] = 0.05      # retiré du profil le 26/11 (session 13) : on vérifie le mécanisme
     dc = DrillCurriculum.from_cfg(cfg)
     assert dc.levels["air"] == dc.levels["reset"] == 0.0
     assert dc.levels["aerial"] == 0.4 and dc.levels["aerial_defense"] == 0.2
