@@ -40,6 +40,7 @@ WORK = ROOT / "dist" / "kaggle"                    # dist/ n'est pas versionné
 STATE = WORK / "state.json"                        # runs lancés avec --init (pour le réattacher si besoin)
 MESHES_DATASET = "rl-collision-meshes"
 INIT_DATASET = "rl-agent-init"
+RESUME_DATASET = "rl-agent-resume"                 # run à reprendre venu d'ailleurs (kit d'un autre compte, 27/11)
 OPP_DATASET = "rl-agent-opponents"                 # modèle de Nexto (sparring et imitation, session 10)
 NEXTO_MODEL = ROOT / "dist" / "opponents" / "NectoFamily" / "nexto" / "nexto-model.pt"
 # bots de sparring GigaLearn (poids .lt), rangés comme dans dist/opponents
@@ -298,7 +299,16 @@ def cmd_launch(args) -> None:
     elif state.get(args.run_name, {}).get("init"):
         # le notebook ne s'en sert que si le run n'a encore aucun checkpoint (1re session interrompue trop tôt)
         sources.append(f"{username(k)}/{INIT_DATASET}")
-    resume = status is not None and not args.fresh
+    if args.resume_zip:
+        # Run poursuivi sur un autre compte (session 12, kit du camarade) : son état local (make_kaggle_kit.py) part en
+        # dataset ; le notebook reprend le run le plus avancé parmi ses entrées (latest.txt), donc celui-ci plutôt que
+        # l'Output plus ancien de la version précédente de ce notebook.
+        zp = Path(args.resume_zip)
+        sources.append(upload_dataset(k, RESUME_DATASET, "rl agent resume", [zp], f"{args.run_name} : {zp.name}")
+                       if k else f"{username(k)}/{RESUME_DATASET}")
+    elif args.resume_dataset:                         # déjà déposé (un lancement précédent interrompu après l'envoi)
+        sources.append(f"{username(k)}/{RESUME_DATASET}")
+    resume = (status is not None or bool(args.resume_zip or args.resume_dataset)) and not args.fresh
 
     params = {"PLATFORM": "auto", "MODE": args.mode, "RUN_NAME": args.run_name, "PROFILES": " ".join(args.profiles),
               "HOURS": args.hours, "AUTOTUNE": not args.no_autotune,
@@ -496,6 +506,9 @@ def main() -> None:
     p.add_argument("--anchors-from", nargs="+", default=None, metavar="PROFIL",
                    help="profils dont on fige les selfplay.anchors dans le point de départ")
     p.add_argument("--fresh", action="store_true", help="ne pas reprendre l'Output de la version précédente")
+    p.add_argument("--resume-zip", default=None,
+                   help="zip de reprise (dist/kit_kaggle_<run>/datasets/rl-agent-resume.zip) → dataset rl-agent-resume")
+    p.add_argument("--resume-dataset", action="store_true", help="joindre le dataset rl-agent-resume déjà déposé")
     p.add_argument("--force", action="store_true", help="lancer même si une session de ce run tourne déjà")
     p.add_argument("--dry-run", action="store_true", help="préparer le notebook sans rien envoyer")
     p.set_defaults(func=cmd_launch)
