@@ -1404,12 +1404,12 @@ def is_dribbling(car, ball_pos, ball_vel) -> bool:
     return norm3(np.asarray(ball_vel) - car.physics.linear_velocity) < DRIBBLE_MAX_REL
 
 
-def keeper_of(state, team: int, ball_pos) -> Optional[str]:
-    """Gardien de l'équipe `team` : sa voiture la plus proche de son but, à moins de `KEEPER_MAX_DIST` du fond du but,
+def keeper_of(state, team: int, ball_pos, max_dist: float = KEEPER_MAX_DIST) -> Optional[str]:
+    """Gardien de l'équipe `team` : sa voiture la plus proche de son but, à moins de `max_dist` du fond du but,
     plus près de ce but que la balle (entre la balle et la ligne). None sinon."""
     goal = _OWN_GOAL if team == cv.BLUE_TEAM else _OWN_GOAL_ORANGE
     ball_d = math.dist(ball_pos, goal)
-    best, best_d = None, KEEPER_MAX_DIST
+    best, best_d = None, float(max_dist)
     for a, car in state.cars.items():
         if car.team_num != team or car.is_demoed:
             continue
@@ -1431,24 +1431,75 @@ def attack_on_keeper(state, car, ball_pos, ball_vel, min_vy: float = 300.0) -> O
     return keeper_of(state, 1 - car.team_num, ball_pos)
 
 
+# Palier 30 (28/11, PO : en 1v1 offensif il flicke dans le gardien au lieu de le bumper ou de le démolir). La situation
+# du palier 28 (balle à 400 uu qui file vers le but, gardien dans ses cages) n'arrivait que 0,08 fois par minute contre
+# Nexto : le geste ne pouvait pas s'apprendre. Situation élargie : la possession offensive.
+POSSESSION_MAX_DIST = 1000.0    # balle à nous : à moins de 1 000 uu de la voiture à l'horizontale…
+DEFENDER_MAX_DIST = 3000.0      # … dernier défenseur à moins de 3 000 uu du fond de son but (~2 100 uu devant la ligne)…
+DEFENDER_REACH = 2500.0         # … et à portée de bump : à moins de 2 500 uu de nous
+
+
+def offense_on_defender(state, car, ball_pos, ball_vel) -> Optional[str]:
+    """Possession offensive : balle dans le camp adverse, à moins de `POSSESSION_MAX_DIST` de la voiture, qui ne revient
+    pas vers notre camp, et nous plus près d'elle que le défenseur ; dernier défenseur adverse (`keeper_of` jusqu'à
+    `DEFENDER_MAX_DIST`) entre la balle et son but, à moins de `DEFENDER_REACH` de nous. Renvoie ce défenseur. Que notre
+    équipe ait touché la balle en dernier est vérifié par l'appelant."""
+    if car.is_demoed:
+        return None
+    s = _team_sign(car.team_num)
+    if ball_pos[1] * s <= 0.0 or ball_vel[1] * s < 0.0:
+        return None
+    p = car.physics.position
+    d_ball = math.hypot(ball_pos[0] - p[0], ball_pos[1] - p[1])
+    if d_ball > POSSESSION_MAX_DIST:
+        return None
+    defender = keeper_of(state, 1 - car.team_num, ball_pos, DEFENDER_MAX_DIST)
+    if defender is None:
+        return None
+    q = state.cars[defender].physics.position
+    if math.hypot(ball_pos[0] - q[0], ball_pos[1] - q[1]) < d_ball:
+        return None
+    if math.hypot(q[0] - p[0], q[1] - p[1]) > DEFENDER_REACH:
+        return None
+    return defender
+
+
 class KeeperBumpTerm(RewardTerm):
-    """Palier 28 (26/11, PO : balle sur le capot vers le but, il suffit de bumper le gardien et la balle rentre seule).
-    +1 au début d'un bump (sans démo) sur le gardien adverse (`keeper_of`), si la balle est à nous : notre équipe l'a
-    touchée en dernier, elle est à moins de 400 uu de nous, dans le camp adverse et file vers le but adverse
-    (`attack_on_keeper`). Payé tout de suite, contrairement à `bump_goal` (seulement si le but suit), pour que le geste
-    soit appris même quand le but ne vient pas. Une fois par possession (jusqu'à ce que l'adversaire touche la balle) et
-    au plus une fois toutes les `cooldown_s` secondes par voiture : la boucle « bumper le gardien sans marquer » rapporte
-    au plus 60 / cooldown_s par minute × poids (tests/test_paliers_26_29.py). Zéro-somme : le gardien bumpé perd autant."""
+    """Bump ou démo du défenseur adverse quand on attaque balle à nous.
+
+    Palier 28 (26/11, PO : balle sur le capot vers le but, il suffit de bumper le gardien et la balle rentre seule),
+    `situation="dribble"` : +1 au début d'un bump (sans démo) sur le gardien (`attack_on_keeper` : balle à moins de 400 uu,
+    qui file vers le but adverse, gardien dans ses cages). Mesuré en session 13 : 0,08 situation par minute, jamais appris.
+    Palier 30 (28/11, PO : en 1v1 offensif il flicke dans le gardien au lieu de le bumper ou de le démolir),
+    `situation="possession"` : la possession offensive (`offense_on_defender`), et la démo du défenseur compte aussi
+    (`pay_demo`). La situation est celle du step d'avant le contact (à la démo, la victime n'est déjà plus en jeu).
+    Dans les deux cas : notre équipe a touché la balle en dernier ; payé tout de suite, contrairement à `bump_goal` et
+    `demo_goal` (seulement si le but suit), pour que le geste soit appris même quand le but ne vient pas. Une fois par
+    possession (jusqu'à ce que l'adversaire touche la balle) et au plus une fois toutes les `cooldown_s` secondes par
+    voiture : la boucle « bumper le défenseur sans marquer » rapporte au plus 60 / cooldown_s par minute × poids
+    (tests/test_palier_30.py). Zéro-somme : le défenseur bumpé perd autant."""
     name = "keeper_bump"
 
-    def __init__(self, cooldown_s: float = 10.0):
+    def __init__(self, cooldown_s: float = 10.0, situation: str = "dribble", pay_demo: bool = False):
+        if situation not in ("dribble", "possession"):
+            raise ValueError(f"keeper_bump : situation inconnue {situation!r}")
         self.cooldown_s = float(cooldown_s)
+        self.situation = situation
+        self.pay_demo = bool(pay_demo)
+
+    def _target(self, state, car, ball_pos, ball_vel) -> Optional[str]:
+        if car.team_num != self.owner:
+            return None
+        if self.situation == "possession":
+            return offense_on_defender(state, car, ball_pos, ball_vel)
+        return attack_on_keeper(state, car, ball_pos, ball_vel)
 
     def reset(self, agents, state, shared_info):
         self.prev = {a: _contact_victim(state.cars[a]) for a in agents}
         self.last: Dict[str, int] = {}
         self.owner: Optional[int] = None         # équipe qui a touché la balle en dernier
         self.paid: set = set()                   # voitures déjà payées pendant cette possession
+        self.target: Dict[str, Optional[str]] = {}   # défenseur visé au step précédent
 
     def get(self, agents, state, shared_info):
         tick = int(getattr(state, "tick_count", 0) or 0)
@@ -1466,11 +1517,17 @@ class KeeperBumpTerm(RewardTerm):
             victim = _contact_victim(car)
             new = victim is not None and victim != self.prev.get(a) and victim in state.cars
             self.prev[a] = victim
-            if not new or state.cars[victim].is_demoed or car.team_num != self.owner or a in self.paid:
+            before = self.target.get(a)
+            now = self._target(state, car, ball_pos, ball_vel)
+            self.target[a] = now
+            if not new or car.team_num != self.owner or a in self.paid:
+                continue
+            if state.cars[victim].is_demoed and not self.pay_demo:
                 continue
             if tick - self.last.get(a, -10**9) < self.cooldown_s * cv.TICKS_PER_SECOND:
                 continue
-            if attack_on_keeper(state, car, ball_pos, ball_vel) == victim:
+            ok = victim == now if self.situation == "dribble" else victim in (before, now)
+            if ok:
                 out[a] = 1.0
                 self.paid.add(a)
                 self.last[a] = tick
@@ -1647,7 +1704,9 @@ def make_reward(cfg: Dict[str, Any]) -> TeamReward:
                      max_speed=rc.get("slow_turn_max_speed", 800.0), min_dist=rc.get("slow_turn_min_dist", 700.0)),
         PowerslideTurnTerm(cooldown_s=rc.get("powerslide_cooldown_s", 2.0)),
         # paliers 26-29 (26/11/2026)
-        KeeperBumpTerm(cooldown_s=rc.get("keeper_bump_cooldown_s", 10.0)),
+        KeeperBumpTerm(cooldown_s=rc.get("keeper_bump_cooldown_s", 10.0),
+                       situation=rc.get("keeper_bump_situation", "dribble"),
+                       pay_demo=rc.get("keeper_bump_demo", False)),
     ]
     stages = (cfg.get("curriculum") or {}).get("stages") or []
     return TeamReward(terms, rc["weights"], rc.get("anneal"), rc.get("team_spirit"), rc.get("zero_sum", 1.0),

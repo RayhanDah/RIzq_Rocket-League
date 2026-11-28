@@ -159,6 +159,14 @@ rewards:
   fast_aerial_min_z: 500.0         # fast_aerial : 1re touche d'un vol avec double saut, balle à 500 uu ou plus…
   fast_aerial_fast_s: 0.8          # … plein dans les 0,8 s après le décollage, 0 à 2 s
   fast_aerial_slow_s: 2.0
+  # keeper_bump (palier 30, 28/11, PO) : possession offensive au lieu du dribble face au gardien (0,08 situation / min
+  # contre Nexto en session 13), démo du défenseur comprise, 40 s entre deux paiements : ≤ 1,5 / min × poids.
+  # Mesuré le 28/11 (v37780, style_audit, 48 matchs argmax contre Nexto et Necto, 96 en auto-jeu échantillonné) :
+  # 2,1 / 1,1 / 1,0 situations par minute (×13 à ×27), bump ou démo dans 1-3 % d'entre elles, 0,01-0,04 paiement par
+  # minute : le délai entre deux paiements ne joue presque jamais, d'où 40 s pour pouvoir payer 3.
+  keeper_bump_situation: possession
+  keeper_bump_demo: true
+  keeper_bump_cooldown_s: 40.0
   flight_touch_floor: 0.1        # jongler au mur sans rien apporter : 0,05 par vol (tests/test_exploits.py)
   weights:
     goal: 10.0
@@ -434,6 +442,21 @@ curriculum:
     - name: aeriennes_rapides
       rewards: {fast_aerial: 2.0}
       blend_steps: 200_000_000
+      # Session 14 : déjà 2,28 G steps à ce palier (35,50 → 37,78 G, écart +22…+35 face à v33875 à la fin) ; passe au
+      # palier 30 dès la reprise.
+      min_steps: 500_000_000
+      advance: {goals_per_min: 2.0, ladder/gap/actor_0033875014025: -25}
+    # Palier 30, dernier run avant la 1.0 (28/11, PO : v37780 est meilleur, mais en 1v1 offensif il continue ses flicks
+    # dans le gardien et ne joue ni le bump ni la démo). keeper_bump 1 → 3 sur la possession offensive (balle à nous
+    # dans le camp adverse, dernier défenseur entre la balle et son but, à portée), démo comprise, 40 s entre deux :
+    # 4,5 / min en moyenne (6 au plus sur une minute) si la boucle « bumper sans marquer » était jouée à fond, sous un
+    # demi-but (but = 20 depuis « lucidite »). shot_threat et le flick ne
+    # changent pas : on rend le bump rentable, on ne punit pas le flick. drill_dribble garde ses 4 %, gardien qui sort une
+    # fois sur deux. Aucun autre changement. Repère : v37780 (meilleure du ladder de la session 13).
+    - name: sortir_defenseur
+      rewards: {keeper_bump: 3.0}
+      blend_steps: 200_000_000
+      min_steps: 500_000_000
 selfplay:
   hist_prob: 0.25
   # Sparring contre des bots externes (selfplay.sparring, algo/worker.py). Session 10 (22/11) : Nexto seul, 10 %.
@@ -477,10 +500,11 @@ selfplay:
   # v25785 : meilleure version de la session 9 et bot actuel (BO3 du 21/11 : 2-0 contre Necto et v27450, 1-2 contre
   # v23037) ; repère des paliers 18-20.
   # v30160 : fin de la session 11, repère des paliers 21-25. v33875 : fin de la session 12 et bot actuel (26/11 : 2-1
-  # contre v30160, 6-4 contre Necto dans le vrai jeu) ; repère des paliers 26-29.
+  # contre v30160, 6-4 contre Necto dans le vrai jeu) ; repère des paliers 26-29. v37780 : meilleure du ladder de la
+  # session 13 (13-12 contre v33875 dans le vrai jeu, 9-2 contre Necto) ; repère du palier 30.
   anchors: [runs/s6_spo_kaggle, pool/actor_0005315235148.pt, pool/actor_0006800183709.pt, pool/actor_0007000329112.pt,
             pool/actor_0007565061406.pt, pool/actor_0008100114172.pt, pool/actor_0008400059217.pt,
             pool/actor_0013535043833.pt, pool/actor_0013600266923.pt, pool/actor_0013720292116.pt,
             pool/actor_0018160005774.pt, checkpoints/ckpt_0023037887394.pt, pool/actor_0025785348226.pt, pool/actor_0030160068410.pt,
-            pool/actor_0033875014025.pt]
+            pool/actor_0033875014025.pt, pool/actor_0037780085008.pt]
   anchor_prob: 0.5                 # 12,5 % des épisodes

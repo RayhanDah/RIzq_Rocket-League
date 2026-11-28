@@ -8,7 +8,8 @@ from rlagent.algo.worker import sparring_settings
 from rlagent.config import load_config
 from rlagent.curriculum import SkillCurriculum
 from rlagent.env.mutators import DRILLS, DribbleDrill
-from rlagent.env.rewards import KeeperBumpTerm, attack_on_keeper, is_dribbling, keeper_of, make_reward
+from rlagent.env.rewards import (DEFENDER_MAX_DIST, KeeperBumpTerm, attack_on_keeper, is_dribbling, keeper_of,
+                                 make_reward)
 
 NEW = ["boost_plus", "mobilite_x5", "bump_gardien", "aeriennes_rapides"]
 V33875 = "pool/actor_0033875014025.pt"
@@ -33,7 +34,8 @@ def stage(cfg, name):
 # --------------------------------------------------------------------------- configuration
 def test_stages_26_29_follow_mobilite_one_change_each(cfg):
     names = [s["name"] for s in cfg["curriculum"]["stages"]]
-    assert names[names.index("mobilite"):] == ["mobilite"] + NEW
+    i = names.index("mobilite")
+    assert names[i:i + 5] == ["mobilite"] + NEW                       # palier 30 ensuite (tests/test_palier_30.py)
     w = weights(cfg)
     chg = lambda a, b: {k for k in set(a) | set(b) if a.get(k, 0.0) != b.get(k, 0.0)}   # noqa: E731
     seq = ["mobilite"] + NEW
@@ -160,4 +162,4 @@ def test_dribble_drill_places_ball_on_roof_and_keeper_in_goal():
         pos, vel = st.ball.position.tolist(), st.ball.linear_velocity.tolist()
         car.wheels_with_contact = (True,) * 4
         assert is_dribbling(car, pos, vel)
-        assert keeper_of(st, 1 - team, pos) is not None
+        assert keeper_of(st, 1 - team, pos, DEFENDER_MAX_DIST) is not None   # palier 30 : il sort parfois

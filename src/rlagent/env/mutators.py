@@ -529,8 +529,8 @@ class DribbleDrill(_Drill):
     """Palier 28 (26/11, PO : il arrive souvent balle sur le capot face au gardien ; un bump du gardien et la balle rentre
     seule). Notre voiture au sol dans le camp adverse, lancée vers le but adverse, balle posée sur son toit et qui avance
     avec elle ; le gardien adverse dans ses cages, immobile ou qui sort à sa rencontre. Le reste de l'épisode est un match
-    normal : tirer, flicker ou bumper le gardien, au bot de choisir. Réussite : but de notre équipe en 6 s
-    (metrics/episode.py)."""
+    normal : tirer, flicker ou bumper le gardien, au bot de choisir. Réussite : but de notre équipe en 6 s, ou (palier 30)
+    bump / démo du gardien dans ce délai (metrics/episode.py)."""
     kind = "dribble"
 
     def setup(self, state, team, r):
@@ -548,8 +548,12 @@ class DribbleDrill(_Drill):
         state.ball.angular_velocity = np.zeros(3, dtype=np.float32)
         for k, opp in enumerate(_team_cars(state, 1 - team)):
             if k == 0:                                       # gardien
-                kx, ky = r.uniform(-700, 700), goal_y - d * r.uniform(100, 700)
-                _place_car(opp, kx, ky, float(np.arctan2(y - ky, x - kx)), r.uniform(0, 600), r.uniform(0, 100))
+                # palier 30 (28/11) : une fois sur deux, il sort à la rencontre (jusqu'à 1 500 uu devant le fond du
+                # terrain, à 900 uu/s au plus) : la situation de possession offensive, pas seulement le gardien sur sa ligne
+                out = r.random() < 0.5
+                kx, ky = r.uniform(-700, 700), goal_y - d * (r.uniform(700, 1500) if out else r.uniform(100, 700))
+                _place_car(opp, kx, ky, float(np.arctan2(y - ky, x - kx)), r.uniform(300, 900) if out else r.uniform(0, 600),
+                           r.uniform(0, 100))
             else:                                            # coéquipiers adverses en retard (2v2 / 3v3)
                 _place_car(opp, r.uniform(-3000, 3000), y - d * r.uniform(1500, 3500), float(d * np.pi / 2),
                            r.uniform(500, 1500), r.uniform(0, 100))

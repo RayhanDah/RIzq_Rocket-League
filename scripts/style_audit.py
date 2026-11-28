@@ -38,6 +38,7 @@ AIR_BOOST_S = 0.25             # boost en l'air avant la touche pour parler de v
 WALL_TAKEOFF_Z = 300.0         # décollage au-dessus : la voiture quitte un mur
 STRONG_DV = 556.0              # frappe (uu/s), seuil de strong_touch
 DK_S = 3.0                     # dribble face au gardien : issue cherchée dans les 3 s
+PO_S = 3.0                     # possession offensive : issue cherchée dans les 3 s
 FLICK_S = (0.25, 0.4)          # flick : flip lancé ≤ 0,25 s après le dribble, frappe ≤ 0,4 s après le flip
 DASH_GROUND_S = 0.25           # dash : flip lancé au ras du sol (< 120 uu), ≤ 0,25 s après avoir quitté le sol (saut, puis dodge 2 steps après)
 
@@ -47,7 +48,10 @@ COUNTERS = ("goals", "touches", "strong_touches", "on_target", "off_target", "sp
             "kickoff_stalls", "demo_goals", "high_goals",
             # 26/11 : dribble face au gardien (balle à nous vers le but adverse, gardien dans ses cages) et ce qui suit
             "dribbles", "dk", "dk_bump", "dk_flick", "dk_lost", "dk_goal", "dk_bump_goal",
-            "dashes", "dashes_noboost", "flicks", "flicks_on_target")
+            "dashes", "dashes_noboost", "flicks", "flicks_on_target",
+            # 28/11 (palier 30) : possession offensive (balle à nous dans le camp adverse, dernier défenseur entre la
+            # balle et son but, à portée) et ce qui suit ; keeper_bumps = paiements du terme keeper_bump du run
+            "po", "po_bump", "po_demo", "po_flick", "po_shot", "po_lost", "po_goal", "keeper_bumps")
 SUMS = ("speed", "boost", "supersonic", "air", "air_boost", "low_boost", "own_half", "ball_dist", "closer", "steps")
 
 _env = None
@@ -109,12 +113,16 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
         cars = {a: {"flip": bool(c.has_flipped), "demo": float(c.demo_respawn_timer), "boost": float(c.boost_amount),
                     "victim": c.bump_victim_id, "air_boost": 0.0, "takeoff_z": 17.0, "ground": bool(c.on_ground),
                     "jumped": bool(c.has_jumped), "drib": False, "drib_t": -9.0, "ground_t": 0.0,
-                    "flick_t": None, "dk": None}
+                    "flick_t": None, "dk": None, "po": None}
                 for a, c in s.cars.items()}
         return ball, cars
 
-    from rlagent.env.rewards import DemoGoalTerm, HighGoalTerm, attack_on_keeper, is_dribbling
-    goal_terms = {"demo_goals": DemoGoalTerm(window_s=_rc.get("demo_goal_window_s", 3.0),
+    from rlagent.env.rewards import (DemoGoalTerm, HighGoalTerm, KeeperBumpTerm, attack_on_keeper, is_dribbling,
+                                     offense_on_defender)
+    goal_terms = {"keeper_bumps": KeeperBumpTerm(cooldown_s=_rc.get("keeper_bump_cooldown_s", 10.0),
+                                                 situation=_rc.get("keeper_bump_situation", "dribble"),
+                                                 pay_demo=_rc.get("keeper_bump_demo", False)),
+                  "demo_goals": DemoGoalTerm(window_s=_rc.get("demo_goal_window_s", 3.0),
                                            last_defender_only=_rc.get("demo_goal_last_defender", True),
                                            own_half_only=_rc.get("demo_goal_own_half", True),
                                            full_s=_rc.get("demo_goal_full_s", 0.75)),
@@ -220,6 +228,28 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
                 elif opp_touch:
                     dk["out"] = "lost"
                     d["dk_lost"] += 1
+            po = p["po"]
+            if po is not None and t - po["t"] > PO_S:
+                p["po"] = po = None
+            if po is None and last_touch is not None and last_touch[0] == side_of[car.team_num]:
+                defender = offense_on_defender(state, car, pos, vel)
+                if defender is not None:
+                    d["po"] += 1
+                    p["po"] = po = {"t": t, "def": defender, "out": None}
+            if po is not None and po["out"] is None:
+                opp_touch = any(c.ball_touches > 0 for c in state.cars.values() if c.team_num != car.team_num)
+                if new_victim == po["def"]:
+                    po["out"] = "demo" if state.cars[po["def"]].is_demoed else "bump"
+                    d["po_" + po["out"]] += 1
+                elif flip_start:
+                    po["out"] = "flick"
+                    d["po_flick"] += 1
+                elif car.ball_touches > 0 and dv >= STRONG_DV:
+                    po["out"] = "shot"
+                    d["po_shot"] += 1
+                elif opp_touch:
+                    po["out"] = "lost"
+                    d["po_lost"] += 1
             if ground:
                 p["air_boost"], p["takeoff_z"] = 0.0, float(car.physics.position[2])
             elif car.is_boosting:
@@ -269,6 +299,9 @@ def play_game(spec_a: str, spec_b: str, a_team: int, det_a: bool, det_b: bool = 
                 st[side_of[0] if pos[1] > 0 else side_of[1]]["kickoff_won"] += 1
         if scored:
             for ag, car in state.cars.items():          # but pendant une situation « dribble face au gardien »
+                po = prev[ag]["po"]
+                if po is not None and car.team_num == state.scoring_team:
+                    st[side_of[car.team_num]]["po_goal"] += 1
                 dk = prev[ag]["dk"]
                 if dk is not None and car.team_num == state.scoring_team:
                     st[side_of[car.team_num]]["dk_goal"] += 1
@@ -340,6 +373,10 @@ def summarize(d: dict) -> dict:
                     "fg_bump_puis_but": d["dk_bump_goal"], "flicks/min": per_min("flicks"),
                     "flicks_cadres_%": 100 * d["flicks_on_target"] / max(1, d["flicks"]),
                     "dashes/min": per_min("dashes"), "dashes_sans_boost/min": per_min("dashes_noboost")},
+        "possession_offensive": {"situations/min": per_min("po"),
+                                 **{f"{k}_%": 100 * d["po_" + k] / max(1, d["po"])
+                                    for k in ("bump", "demo", "flick", "shot", "lost", "goal")},
+                                 "keeper_bump_payes/min": per_min("keeper_bumps")},
     }
 
 
@@ -389,7 +426,7 @@ def main():
         name = spec.split(":", 1)[0]
         res[f"{name}_fidelite"] = bot_fidelity(spec)
         print(f"--- {name.capitalize()} (adaptateur RocketSim)\n" + res[f"{name}_fidelite"]["texte"])
-    for block in ("rush", "finition", "kickoff", "aerien", "dribble"):
+    for block in ("rush", "finition", "kickoff", "aerien", "dribble", "possession_offensive"):
         print(f"--- {block}" + " " * 22 + "A        B")
         for k in res["A"][block]:
             print(f"{k:30s} {res['A'][block][k]:8.2f} {res['B'][block][k]:8.2f}")

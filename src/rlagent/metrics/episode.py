@@ -271,6 +271,9 @@ class EpisodeTracker:
         ok = False
         if kind in ("shot", "dribble"):
             ok = bool(state.goal_scored and state.scoring_team == team)
+            if kind == "dribble" and not ok:         # palier 30 : sortir le gardien (bump ou démo) réussit aussi
+                ok = any(c.bump_victim_id is not None and c.bump_victim_id in state.cars
+                         and state.cars[c.bump_victim_id].team_num != team for c in mine)
         elif kind == "aerial":
             ok = (any(c.ball_touches > 0 for c in mine)
                   and float(state.ball.position[2]) > aerial_drill_min_z(self.drill_level))
